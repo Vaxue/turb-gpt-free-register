@@ -20,6 +20,7 @@ from email.header import decode_header
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -308,6 +309,19 @@ def pick_account() -> CFTempMailAccount:
 
 def get_account_context(email: str) -> CFTempMailAccount | None:
     return _CONTEXT_CACHE.get(_cache_key(email))
+
+
+def delete_account(email: str) -> bool:
+    """通过 mail.apisaver 管理接口删除临时邮箱。"""
+    address = str(email or "").strip()
+    if not address:
+        return False
+    template = _cfg_str("CLOUDFLARE_PATH_DELETE", "/admin/delete_address/{email}")
+    path = template.format(email=quote(address, safe=""))
+    _request("DELETE", path)
+    _CONTEXT_CACHE.pop(_cache_key(address), None)
+    logger.info("[Cloudflare] 已从远端删除临时邮箱: %s", address)
+    return True
 
 
 def release_account(email: str, status: str = "available", note: str | None = None) -> None:

@@ -200,7 +200,17 @@ def _delete_failed_mail_apisaver_email(email: str | None, reason: str) -> bool:
             return False
 
         from core.email_provider import resolve_email_source
-        if resolve_email_source(email) != "generic_api":
+        source = resolve_email_source(email)
+
+        # 当前 mail.apisaver 使用 Cloudflare 临时邮箱模式，直接调用其管理员删除接口。
+        if source == "cloudflare" and email.lower().endswith("@mail.apisaver.com"):
+            from core.cf_temp_mail_client import delete_account
+            deleted = bool(delete_account(email))
+            if deleted:
+                logger.warning("[Service] 注册失败已从 mail.apisaver 删除临时邮箱: email=%s reason=%s", email, str(reason)[:220])
+            return deleted
+
+        if source != "generic_api":
             return False
 
         from core.generic_api_mail_client import get_account_context
