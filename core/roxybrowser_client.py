@@ -170,15 +170,31 @@ class RoxyBrowserClient:
             or "http 503" in text
             or "http 504" in text
             or "http 429" in text
+            or "insufficient" in text
+            or "resource" in text
         )
 
     def request(self, method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
         url = _join_url(self.api_base, path)
         method_u = method.upper()
-        # create 超时后服务端可能已创建环境，直接重试可能产生孤儿环境；默认不重试 create。
+        # create 在并发较高时可能返回短暂的资源不足；有限次数重试，避免瞬时失败。
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
-        max_attempts = 1 if is_create else max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
-        base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
+        max_attempts = (
+            max(1, int(getattr(_cfg, "ROXY_CREATE_RETRIES", 3) or 3))
+            if is_create
+            else max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
+        )
+        base_delay = max(
+            0.5,
+            float(
+                getattr(
+                    _cfg,
+                    "ROXY_CREATE_RETRY_DELAY" if is_create else "ROXY_API_RETRY_DELAY",
+                    5 if is_create else 2,
+                )
+                or (5 if is_create else 2)
+            ),
+        )
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:

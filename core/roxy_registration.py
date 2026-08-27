@@ -1097,6 +1097,25 @@ def _type_otp(driver, code: str) -> None:
     if not code:
         raise RuntimeError("OTP 验证码为空或不含数字")
 
+    # 邮箱验证码页由 React 异步渲染；高并发时 DOM 可能短暂没有任何 input。
+    # 先等待控件出现，再进入特征匹配，避免 candidates=[] 的瞬时失败。
+    render_deadline = time.time() + 25
+    while time.time() < render_deadline:
+        try:
+            visible_inputs = [
+                e for e in driver.find_elements(By.CSS_SELECTOR, "input:not([type='hidden'])")
+                if _visible(e)
+            ]
+            visible_editable = [
+                e for e in driver.find_elements(By.CSS_SELECTOR, "[contenteditable='true']")
+                if _visible(e)
+            ]
+            if visible_inputs or visible_editable:
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
     # 单输入框
     for selector in [
         "input[autocomplete='one-time-code']",
