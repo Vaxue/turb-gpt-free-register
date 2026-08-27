@@ -11,6 +11,9 @@
 """
 from config.env_loader import apply_env_overrides
 import random
+import secrets
+import string
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 
 # 本地代理入口；实际出口地区以代理/分流规则为准。
@@ -47,9 +50,35 @@ PLAN_CHECK_MIN_INTERVAL = 0.4
 PLAN_CHECK_JITTER = 0.3
 
 
+def _with_task_sticky_session(proxy: str) -> str:
+    """为 CliProxy 动态出口增加任务级 sticky sid，避免同一浏览器会话频繁换 IP。"""
+    value = str(proxy or "").strip()
+    if not value:
+        return value
+    try:
+        parsed = urlsplit(value)
+        host = str(parsed.hostname or "").lower()
+        username = unquote(parsed.username or "")
+        if not host.endswith("cliproxy.io") or not username or "-sid-" in username:
+            return value
+        alphabet = string.ascii_letters + string.digits
+        sid = "".join(secrets.choice(alphabet) for _ in range(8))
+        sticky_username = f"{username}-sid-{sid}-t-10"
+        password = unquote(parsed.password or "")
+        auth = quote(sticky_username, safe="-")
+        if parsed.password is not None:
+            auth += f":{quote(password, safe='')}"
+        host_port = parsed.hostname or ""
+        if parsed.port:
+            host_port += f":{parsed.port}"
+        return urlunsplit((parsed.scheme, f"{auth}@{host_port}", parsed.path, parsed.query, parsed.fragment))
+    except Exception:
+        return value
+
+
 def pick_proxy() -> str:
-    """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。"""
-    return random.choice(PROXY_POOL) if PROXY_POOL else ""
+    """抽取代理；CliProxy 每个调用生成独立 sticky sid，任务内保持同一出口。"""
+    return _with_task_sticky_session(random.choice(PROXY_POOL)) if PROXY_POOL else ""
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理

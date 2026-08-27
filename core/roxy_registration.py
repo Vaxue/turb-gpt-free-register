@@ -438,6 +438,39 @@ def _find_visible_email_input_js(driver):
     """)
 
 
+def _is_cloudflare_challenge_page(driver) -> bool:
+    """识别 Cloudflare 挑战页，避免把它误报成缺少邮箱输入框。"""
+    try:
+        return bool(driver.execute_script(r"""
+        const title = String(document.title || '').toLowerCase();
+        const url = String(location.href || '').toLowerCase();
+        const body = String(document.body?.innerText || '').toLowerCase();
+        const challengeNode = document.querySelector(
+          '[id*="challenge" i], [class*="challenge" i], iframe[src*="challenge" i], iframe[src*="turnstile" i], script[src*="challenge" i]'
+        );
+        return /just a moment|un instant|稍候|请稍候/.test(title)
+          || /__cf_chl_|challenge-platform|challenges.cloudflare.com/.test(url)
+          || !!challengeNode
+          || (/verify you are human|checking your browser|验证您是人类/.test(body) && !document.querySelector('input[type="email"],input[name="email"],input[name="username"],input[autocomplete="email"]'));
+        """))
+    except Exception:
+        return False
+
+
+def _poke_cloudflare_challenge(driver) -> None:
+    """将验证控件滚入视口，给 managed challenge 一个正常的页面生命周期。"""
+    try:
+        driver.execute_script(r"""
+        const target = document.querySelector(
+          'iframe[src*="challenge" i], iframe[src*="turnstile" i], [id*="challenge" i], [class*="challenge" i]'
+        );
+        if (target) target.scrollIntoView({block: 'center', inline: 'center'});
+        try { window.focus(); } catch (_) {}
+        """)
+    except Exception:
+        pass
+
+
 def _is_oauth_consent_like(driver) -> bool:
     """检测是否已到 OAuth 授权/consent 页。这里不能再点任何邮箱分支或全局提交按钮。"""
     try:
@@ -518,11 +551,27 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     end = time.time() + (timeout or int(_cfg.ROXY_SELENIUM_TIMEOUT))
     last_state = None
     clicked_email_option = False
+    challenge_seen = False
+    challenge_log_at = 0.0
     while time.time() < end:
         el = _find_visible_email_input_js(driver)
         if el:
+            if challenge_seen:
+                logger.info("%s Cloudflare 挑战页已结束，检测到邮箱输入框", _log_prefix(driver))
             _human_type_text(driver, el, email, clear=True)
             return
+        if _is_cloudflare_challenge_page(driver):
+            if not challenge_seen:
+                challenge_seen = True
+                logger.warning("%s 检测到 Cloudflare challenge，等待页面完成后再查找邮箱输入框", _log_prefix(driver))
+            if time.time() - challenge_log_at >= 10:
+                _poke_cloudflare_challenge(driver)
+                challenge_log_at = time.time()
+            time.sleep(1.0)
+            continue
+        if challenge_seen:
+            logger.info("%s Cloudflare challenge 状态已清除，继续查找邮箱输入框", _log_prefix(driver))
+            challenge_seen = False
         last_state = _email_entry_state(driver)
         if not clicked_email_option and _click_email_entry_option(driver):
             clicked_email_option = True
@@ -530,6 +579,11 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
             _assert_not_external_idp(driver, "点击邮箱入口后")
             continue
         time.sleep(0.4)
+    if challenge_seen or _is_cloudflare_challenge_page(driver):
+        raise RuntimeError(
+            f"Cloudflare challenge 未在 {timeout or int(_cfg.ROXY_SELENIUM_TIMEOUT)} 秒内完成，"
+            f"请更换代理出口后重试，state={_email_entry_state(driver)}"
+        )
     raise RuntimeError(f"找不到邮箱输入框/邮箱入口（未使用文字识别），state={last_state}")
 
 
@@ -1005,8 +1059,15 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
 def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
     """填写并提交邮箱，必须确认进入 password/otp/logged_in 才返回。"""
     last_state = None
+    email_entry_timeout = 20
+    if driver.__class__.__name__ == "CloakSeleniumDriver":
+        try:
+            from config import cloakbrowser as cloak_cfg
+            email_entry_timeout = max(20, int(getattr(cloak_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
+        except Exception:
+            email_entry_timeout = 90
     for attempt in range(1, attempts + 1):
-        _type_email_address(driver, email, timeout=20)
+        _type_email_address(driver, email, timeout=email_entry_timeout)
         state = _email_input_value_state(driver)
         last_state = state
         values = [str(i.get("value") or "") for i in (state.get("inputs") or [])]
@@ -1032,24 +1093,32 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
 def _type_otp(driver, code: str) -> None:
     from selenium.webdriver.common.by import By
 
+    code = "".join(ch for ch in str(code or "") if ch.isdigit())
+    if not code:
+        raise RuntimeError("OTP 验证码为空或不含数字")
+
     # 单输入框
     for selector in [
         "input[autocomplete='one-time-code']",
         "input[name='code']",
         "input[inputmode='numeric']",
         "input[type='tel']",
+        "input[aria-label*='digit' i]",
+        "input[aria-label*='code' i]",
     ]:
         els = [e for e in driver.find_elements(By.CSS_SELECTOR, selector) if _visible(e)]
         if len(els) == 1:
             _human_type_text(driver, els[0], code, clear=True)
             return
 
-    # 6 个分格输入框
-    boxes = [e for e in driver.find_elements(By.CSS_SELECTOR, "input") if _visible(e)]
+    # 6 个分格输入框。新版页面有时只使用普通 text input，靠 maxlength/aria-label
+    # 识别；如果页面已明确是验证码页且只剩一个普通输入框，也直接使用它。
+    boxes = [e for e in driver.find_elements(By.CSS_SELECTOR, "input:not([type='hidden'])") if _visible(e)]
     numeric_boxes = []
     for e in boxes:
-        attrs = " ".join(str(e.get_attribute(k) or "") for k in ("inputmode", "autocomplete", "aria-label", "name", "id", "type"))
-        if any(x in attrs.lower() for x in ("numeric", "one-time", "code", "otp", "tel")):
+        attrs = " ".join(str(e.get_attribute(k) or "") for k in ("inputmode", "autocomplete", "aria-label", "name", "id", "type", "data-index"))
+        maxlength = str(e.get_attribute("maxlength") or "").strip()
+        if any(x in attrs.lower() for x in ("numeric", "one-time", "code", "otp", "tel", "digit")) or maxlength == "1":
             numeric_boxes.append(e)
     if len(numeric_boxes) >= len(code):
         for e, ch in zip(numeric_boxes, code):
@@ -1061,7 +1130,37 @@ def _type_otp(driver, code: str) -> None:
                 human_delay("keystroke")
         return
 
-    raise RuntimeError("找不到 OTP 输入框")
+    # React/ARIA 实现可能使用 contenteditable 作为验证码控件。
+    editable = [e for e in driver.find_elements(By.CSS_SELECTOR, "[contenteditable='true']") if _visible(e)]
+    if len(editable) == 1:
+        _human_type_text(driver, editable[0], code, clear=True)
+        return
+
+    # OTP 页面上下文已经由上游确认，普通可见 text 输入框可作为最后兜底。
+    plain = []
+    for e in boxes:
+        typ = str(e.get_attribute("type") or "text").lower()
+        attrs = " ".join(str(e.get_attribute(k) or "") for k in ("name", "id", "placeholder", "aria-label", "autocomplete")).lower()
+        if typ in ("text", "number") and not any(x in attrs for x in ("email", "e-mail", "password")):
+            plain.append(e)
+    if len(plain) == 1:
+        _human_type_text(driver, plain[0], code, clear=True)
+        return
+    if len(plain) == len(code) and len(code) > 1:
+        for e, ch in zip(plain, code):
+            _human_type_text(driver, e, ch, clear=True)
+        return
+
+    summary = []
+    for e in boxes + editable:
+        try:
+            summary.append({
+                "tag_name": str(getattr(e, "tag_name", "") or ""),
+                **{k: str(e.get_attribute(k) or "") for k in ("type", "name", "id", "autocomplete", "inputmode", "aria-label", "maxlength")},
+            })
+        except Exception:
+            pass
+    raise RuntimeError(f"找不到 OTP 输入框: candidates={summary[:12]}")
 
 
 def _email_otp_page_state(driver) -> dict:

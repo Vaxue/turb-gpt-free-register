@@ -559,6 +559,21 @@ def save_account_data(
     logger.info(f"[Save] 账号已写入 DB, id={row_id}, email={email}")
     logger.info(f"[Save] 批次归档目录: {batch_folder}")
 
+    # 注册成功后同步到 image.apisaver 账号池；接口异常不影响本地注册结果。
+    try:
+        from core.image_account_export import auto_import_image_account
+
+        import_result = auto_import_image_account(access_token, email=email)
+        if import_result.get("ok"):
+            logger.info("[ImageAPI] 自动导入完成: id=%s, email=%s", row_id, email)
+    except Exception as exc:
+        logger.warning(
+            "[ImageAPI] 自动导入失败（不影响注册结果）: email=%s, %s: %s",
+            email,
+            type(exc).__name__,
+            str(exc)[:180],
+        )
+
     auto_twofa = False
     try:
         from config import twofa as _twofa_cfg
