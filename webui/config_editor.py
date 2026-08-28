@@ -541,6 +541,31 @@ EDITABLE_FIELDS = [
         "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
     },
     # ---- 接码平台 ----
+    {
+        "key": "DELETE_FAILED_MAIL_APISAVER_EMAIL", "file": "email.py", "type": "bool", "group": "接码平台",
+        "label": "注册失败自动删除邮箱", "help": "注册任务失败且未落库时，自动从 mail.apisaver.com 删除本次临时邮箱；成功账号邮箱始终保留",
+    },
+    {
+        "key": "CLOUDFLARE_PATH_DELETE", "file": "email.py", "type": "str", "group": "接码平台",
+        "label": "邮箱删除接口路径", "help": "临时邮箱管理端删除接口路径，默认 /admin/delete_address/{email}",
+    },
+    {
+        "key": "IMAGE_API_AUTO_IMPORT", "file": "image_api.py", "type": "bool", "group": "接码平台",
+        "label": "注册成功自动同步生图账号", "help": "注册成功写入本地后，自动将 access token 同步到 image.apisaver 账号池",
+    },
+    {
+        "key": "IMAGE_API_BASE", "file": "image_api.py", "type": "str", "group": "接码平台",
+        "label": "生图账号 API 地址", "help": "image.apisaver 管理 API 根地址，例如 http://127.0.0.1:3100",
+    },
+    {
+        "key": "IMAGE_API_AUTH_KEY", "file": "image_api.py", "type": "str", "group": "接码平台",
+        "label": "生图账号 API 密钥", "help": "image.apisaver 管理 API Bearer 密钥，仅保存在 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "IMAGE_API_TIMEOUT", "file": "image_api.py", "type": "int", "group": "接码平台",
+        "label": "同步请求超时(秒)", "help": "自动同步到 image.apisaver 的 HTTP 请求超时时间",
+    },
     # ---- Codex：基础 / CPA / sub2api 配置 ----
     {
         "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "Codex",

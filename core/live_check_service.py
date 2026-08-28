@@ -54,7 +54,14 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
             f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
         )
-        result = check_account_liveness(email, proxy=selected_proxy, clear_log=False)
+        account = db.get_account(account_id) or {}
+        saved_token = str(account.get("access_token") or "").strip()
+        result = check_account_liveness(
+            email,
+            proxy=selected_proxy,
+            clear_log=False,
+            existing_access_token=saved_token,
+        )
         # 早期 providers/csrf 403 通常是该出口被 CF 拦截，不代表账号死亡。
         # auto/proxy 模式下如果用了代理，额外直连兜底一次，便于和套餐查询的 auto 语义保持接近。
         err_text = str(result.get("error") or "")
@@ -66,7 +73,12 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             and str(route.get("network_route") or "") == "proxy"
         ):
             _append_log(email, "[查活] 代理出口收到 403，尝试直连兜底一次")
-            result = check_account_liveness(email, proxy="", clear_log=False)
+            result = check_account_liveness(
+                email,
+                proxy="",
+                clear_log=False,
+                existing_access_token=saved_token,
+            )
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")

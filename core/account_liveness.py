@@ -65,7 +65,15 @@ def _network_preflight_with_retry(email: str, proxy: str | None, max_attempts: i
                 session.session.close()
             except Exception:
                 pass
-        session = BrowserSession(proxy=proxy if proxy else None, fingerprint_seed=seed)
+        # 显式代理也要在重试时更换 sticky sid，否则“换新 IP”实际仍在重复同一出口。
+        attempt_proxy = proxy
+        if attempt > 1 and proxy:
+            try:
+                from config import proxy as proxy_cfg
+                attempt_proxy = proxy_cfg.pick_proxy() or proxy
+            except Exception:
+                attempt_proxy = proxy
+        session = BrowserSession(proxy=attempt_proxy if attempt_proxy else None, fingerprint_seed=seed)
         logger.info(
             "[查活] 会话创建完成：proxy=%s device_id=%s（网络预检第 %s/%s 次）",
             session.proxy or "配置随机/直连", session.device_id, attempt, max_attempts,
@@ -90,6 +98,56 @@ def _network_preflight_with_retry(email: str, proxy: str | None, max_attempts: i
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _check_saved_access_token(email: str, token: str, proxy: str | None) -> dict | None:
+    """Use the stored AT first; this avoids the unauthenticated Cloudflare-gated providers endpoint."""
+    token = str(token or "").strip()
+    if not token:
+        return None
+    from core.chatgpt_plan import ACCOUNTS_CHECK_PATH
+
+    seed = f"account:{email.lower()}"
+    candidates = [proxy]
+    if proxy:
+        try:
+            from config import proxy as proxy_cfg
+            candidates.append(proxy_cfg.pick_proxy() or proxy)
+        except Exception:
+            pass
+    for selected_proxy in candidates:
+        env = None
+        try:
+            env = BrowserSession(proxy=selected_proxy or "", detect_exit_geo=False, fingerprint_seed=seed)
+            headers = env.get_chatgpt_headers(referer="https://chatgpt.com/")
+            headers["authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            headers["accept"] = "*/*"
+            url = f"https://chatgpt.com{ACCOUNTS_CHECK_PATH}?timezone_offset_min={env.js_timezone_offset_min()}"
+            resp = env.get(url, headers=headers, timeout=15)
+            if int(getattr(resp, "status_code", 0) or 0) == 200:
+                data = resp.json()
+                if isinstance(data, dict) and isinstance(data.get("accounts"), dict):
+                    return {
+                        "ok": True,
+                        "status": "live",
+                        "checked_at": _now(),
+                        "access_token": token,
+                        "proxy_used": env.proxy or None,
+                        "fingerprint": _safe_fingerprint_for_account(env),
+                        "fingerprint_text": _safe_fingerprint_text_for_account(env),
+                    }
+            if int(getattr(resp, "status_code", 0) or 0) in (401, 403):
+                logger.info("[查活] 已保存 AT 返回 HTTP %s，回退邮箱登录：%s", resp.status_code, email)
+                return None
+        except Exception as exc:
+            logger.info("[查活] 已保存 AT 预检失败，继续邮箱登录：%s %s", email, str(exc)[:160])
+        finally:
+            if env is not None:
+                try:
+                    env.session.close()
+                except Exception:
+                    pass
+    return None
 
 
 def _safe_fingerprint_for_account(session: BrowserSession) -> dict:
@@ -308,7 +366,13 @@ def _validate_with_retry(session: BrowserSession, email: str, otp_after_ts: floa
     raise last_exc if last_exc else RuntimeError("OTP 验证失败")
 
 
-def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: bool = True) -> dict:
+def check_account_liveness(
+    email: str,
+    proxy: str | None = None,
+    *,
+    clear_log: bool = True,
+    existing_access_token: str | None = None,
+) -> dict:
     """
     重新登录账号并刷新最新 accessToken。
 
@@ -351,6 +415,10 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
         logger.info("[查活] 日志文件：%s", path)
         logger.info("[查活] 开始重新登录：%s", email)
         logger.info("[查活] 流程：Providers → CSRF → Signin → Authorize → 密码/邮箱 OTP → MFA(如有) → OAuth callback → Session/AT")
+        saved_result = _check_saved_access_token(email, existing_access_token or "", proxy)
+        if saved_result:
+            logger.info("[查活] 已保存 AT 直接校验成功，跳过邮箱登录：%s", email)
+            return saved_result
         session, authorize_url = _network_preflight_with_retry(email, proxy)
 
         otp_after_ts = time.time()
