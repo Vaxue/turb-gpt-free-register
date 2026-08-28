@@ -80,6 +80,14 @@ EDITABLE_FIELDS = [
         "label": "Cloak使用代理", "help": "把本项目传入或代理池抽取的代理传给 CloakBrowser",
     },
     {
+        "key": "CLOAK_PROXY_PRECHECK", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
+        "label": "Cloak代理预检", "help": "启动浏览器前检测代理隧道；检测失败时本次会话自动回退直连",
+    },
+    {
+        "key": "CLOAK_PROXY_PRECHECK_TIMEOUT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
+        "label": "代理预检超时", "help": "代理连通性检测超时时间，秒",
+    },
+    {
         "key": "CLOAK_LICENSE_KEY", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
         "label": "Cloak License", "help": "Pro license；留空使用免费 binary",
     },
@@ -94,6 +102,10 @@ EDITABLE_FIELDS = [
     {
         "key": "CLOAK_SELENIUM_TIMEOUT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
         "label": "Cloak超时", "help": "页面和元素等待超时时间，秒",
+    },
+    {
+        "key": "CLOAK_CHALLENGE_TIMEOUT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
+        "label": "Cloudflare挑战等待", "help": "挑战页面单独等待时长，秒；启用人工行为时会周期性移动鼠标并点击可见控件",
     },
     {
         "key": "CLOAK_KEEP_BROWSER_OPEN", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
@@ -453,6 +465,27 @@ EDITABLE_FIELDS = [
         "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
     },
     {
+        "key": "PROXY_SUBSCRIPTION_URL", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "代理订阅 URL", "help": "可选；支持纯文本、Base64、JSON、Clash 常见节点订阅，保存后按刷新间隔自动更新",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "PROXY_SUBSCRIPTION_ENABLED", "file": "proxy.py", "type": "bool", "group": "代理池",
+        "label": "启用代理订阅", "help": "开启后代理池抽取时自动使用订阅缓存；订阅失败时保留已有代理池",
+    },
+    {
+        "key": "PROXY_SUBSCRIPTION_REFRESH_MINUTES", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "订阅刷新间隔(分钟)", "help": "自动刷新间隔；设置为 0 表示每次抽代理都刷新，不建议用于高并发",
+    },
+    {
+        "key": "PROXY_SUBSCRIPTION_TIMEOUT", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "订阅请求超时(秒)", "help": "拉取代理订阅的 HTTP 超时时间",
+    },
+    {
+        "key": "PROXY_SUBSCRIPTION_BRIDGE_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "订阅转换代理", "help": "VLESS/VMess/Trojan 等 Clash 节点转换后的本地代理地址，默认 socks5h://127.0.0.1:7890",
+    },
+    {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },
@@ -618,6 +651,108 @@ EDITABLE_FIELDS = [
     {
         "key": "L_PHONE_PREFIX", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "L 号码前缀", "help": "L 返回号码不含国家码时填写，例如美国 10 位本地号填 1；留空则不补",
+    },
+    # ---- image.apisaver 额度监控 / 自动注册 ----
+    {
+        "key": "IMAGE_API_AUTO_IMPORT", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "注册成功自动导入 image", "help": "注册成功后把 access token 导入 image.apisaver 账号池",
+    },
+    {
+        "key": "IMAGE_API_BASE", "file": "image_api.py", "type": "str", "group": "image额度监控",
+        "label": "image API 地址", "help": "例如 http://127.0.0.1:3100 或 https://image.apisaver.com",
+    },
+    {
+        "key": "IMAGE_API_AUTH_KEY", "file": "image_api.py", "type": "str", "group": "image额度监控", "secret": True,
+        "label": "image API Key", "help": "用于导入账号和查询额度的 Bearer Key",
+    },
+    {
+        "key": "IMAGE_API_MONITOR_ENABLED", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "启用额度监控", "help": "后台定时查询额度并显示在概览；默认关闭",
+    },
+    {
+        "key": "IMAGE_API_QUOTA_URL", "file": "image_api.py", "type": "str", "group": "image额度监控",
+        "label": "额度查询 URL", "help": "留空使用 image API 地址 + 查询路径；填写完整 URL 可适配自定义接口",
+    },
+    {
+        "key": "IMAGE_API_QUOTA_PATH", "file": "image_api.py", "type": "str", "group": "image额度监控",
+        "label": "额度查询路径", "help": "默认 /api/accounts；接口返回中应包含 quota/balance/credits/remaining 数值",
+    },
+    {
+        "key": "IMAGE_API_QUOTA_THRESHOLD", "file": "image_api.py", "type": "float", "group": "image额度监控",
+        "label": "自动补充阈值", "help": "额度小于等于该值时允许触发注册",
+    },
+    {
+        "key": "IMAGE_API_QUOTA_POLL_SECONDS", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "监控间隔(秒)", "help": "后台查询周期，建议 30-300 秒",
+    },
+    {
+        "key": "IMAGE_API_AUTO_REGISTER", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "低额度自动注册", "help": "低于阈值且 CPU 空闲时自动提交注册任务",
+    },
+    {
+        "key": "IMAGE_API_REGISTER_COUNT", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "每次注册数量", "help": "一次触发提交的任务数",
+    },
+    {
+        "key": "IMAGE_API_REGISTER_WORKERS_MIN", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "最小并发线程", "help": "CPU 忙时使用的注册线程数",
+    },
+    {
+        "key": "IMAGE_API_REGISTER_WORKERS_MAX", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "最大并发线程", "help": "CPU 空闲时使用的注册线程数，受服务端上限约束",
+    },
+    {
+        "key": "IMAGE_API_CPU_IDLE_PERCENT", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "CPU 空闲阈值(%)", "help": "CPU 使用率低于该值才允许自动注册",
+    },
+    {
+        "key": "IMAGE_API_CPU_BUSY_PERCENT", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "CPU 忙碌阈值(%)", "help": "用于动态降低并发的 CPU 使用率阈值",
+    },
+    {
+        "key": "IMAGE_API_TRIGGER_COOLDOWN_SECONDS", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "触发冷却(秒)", "help": "两次自动注册之间的最短间隔，防止重复提交",
+    },
+    {
+        "key": "IMAGE_API_LIVE_CHECK_ENABLED", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "启用定时查活", "help": "按周期重新登录账号并刷新本地 AT；默认关闭",
+    },
+    {
+        "key": "IMAGE_API_LIVE_CHECK_INTERVAL_SECONDS", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "查活间隔(秒)", "help": "定时查活周期，建议 1800-86400 秒",
+    },
+    {
+        "key": "IMAGE_API_LIVE_CHECK_BATCH_SIZE", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "每轮查活数量", "help": "每个周期加入查活队列的账号数，按游标轮转全部账号",
+    },
+    {
+        "key": "IMAGE_API_LIVE_CHECK_SYNC_IMAGE", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "查活后同步 image AT", "help": "查活成功后把最新 access token 更新到 image.apisaver 账号池",
+    },
+    # ---- mail.apisaver 失败邮箱清理 ----
+    {
+        "key": "MAIL_ADMIN_DELETE_FAILED", "file": "email.py", "type": "bool", "group": "邮箱 / OTP",
+        "label": "失败后删除临时邮箱", "help": "注册失败时调用 mail 管理接口删除邮箱；需同时配置地址和鉴权",
+    },
+    {
+        "key": "MAIL_ADMIN_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "邮箱管理地址", "help": "默认 https://mail.apisaver.com",
+    },
+    {
+        "key": "MAIL_ADMIN_DELETE_PATH", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "删除接口路径", "help": "按 mail.apisaver 管理 API 实际路径填写",
+    },
+    {
+        "key": "MAIL_ADMIN_AUTH_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP", "secret": True,
+        "label": "邮箱管理 API Key", "help": "可选 Bearer/API Key",
+    },
+    {
+        "key": "MAIL_ADMIN_PASSWORD", "file": "email.py", "type": "str", "group": "邮箱 / OTP", "secret": True,
+        "label": "邮箱管理密码", "help": "可选管理密码，使用 JSON password 字段发送",
+    },
+    {
+        "key": "MAIL_ADMIN_TIMEOUT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "删除请求超时(秒)", "help": "管理接口请求超时时间",
     },
 ]
 

@@ -19,6 +19,10 @@ CLOAK_TIMEZONE: str = ""
 # 是否把本项目传入/代理池抽取的代理传给 CloakBrowser。
 CLOAK_USE_PROXY: bool = True
 
+# 启动浏览器前先探测代理 CONNECT 隧道；失败时本次会话自动直连。
+CLOAK_PROXY_PRECHECK: bool = True
+CLOAK_PROXY_PRECHECK_TIMEOUT: int = 8
+
 # Pro license；留空则使用免费 binary。
 CLOAK_LICENSE_KEY: str = ""
 
@@ -34,8 +38,11 @@ CLOAK_EXTRA_ARGS: list = []
 # 与原 Roxy Selenium 流程共用的超时时间。
 CLOAK_SELENIUM_TIMEOUT: int = 90
 
+# Cloudflare Managed Challenge 单独等待时长；挑战页通常需要更长的浏览器事件周期。
+CLOAK_CHALLENGE_TIMEOUT: int = 150
+
 # 调试时保留浏览器不自动关闭。
 CLOAK_KEEP_BROWSER_OPEN: bool = False
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})
+apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_PROXY_PRECHECK': 'bool', 'CLOAK_PROXY_PRECHECK_TIMEOUT': 'int', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_CHALLENGE_TIMEOUT': 'int', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})
