@@ -233,6 +233,12 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
+    # 单进程后台监控线程；配置关闭时只等待，不发起网络请求或注册任务。
+    try:
+        from core.image_quota_monitor import ensure_started
+        ensure_started()
+    except Exception:
+        logger.exception("启动 image 额度监控线程失败")
 
     @app.after_request
     def _compress_json_response(response: Response):
@@ -356,7 +362,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             for k in pool:
                 pool[k] += int(one.get(k, 0) or 0)
         domain_pool = db.domain_email_pool_summary()
-        return jsonify({
+        payload = {
             "accounts": db.count_accounts(),
             "outlook_total": pool.get("total", 0),
             "outlook_available": pool.get("available", 0),
@@ -366,7 +372,32 @@ def create_app(auth_code: str | None = None) -> Flask:
             "domain_available": domain_pool.get("available", 0),
             "domain_used": domain_pool.get("used", 0),
             "domain_failed": domain_pool.get("failed", 0),
-        })
+        }
+        try:
+            from core.image_quota_monitor import status as image_quota_status
+            payload["image_quota"] = image_quota_status()
+        except Exception as exc:
+            payload["image_quota"] = {"error": f"{type(exc).__name__}: {exc}"}
+        return jsonify(payload)
+
+    @app.get("/api/image/quota")
+    def api_image_quota():
+        """手动刷新 image.apisaver 额度并返回自动注册状态。"""
+        try:
+            from core.image_quota_monitor import check_once, status as image_quota_status
+            result = check_once(trigger_register=False)
+            return jsonify({"ok": "error" not in result, "result": result, "status": image_quota_status()})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
+
+    @app.post("/api/image/quota/check")
+    def api_image_quota_check():
+        try:
+            from core.image_quota_monitor import check_once, status as image_quota_status
+            result = check_once(trigger_register=True)
+            return jsonify({"ok": "error" not in result, "result": result, "status": image_quota_status()})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
 
     # ----------------------------------------------------------
     # 已注册账号
@@ -2544,6 +2575,17 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/config")
     def api_config_get():
         return jsonify(config_editor.get_config())
+
+    @app.post("/api/proxy/subscription/refresh")
+    def api_proxy_subscription_refresh():
+        """立即拉取代理订阅并返回解析数量/错误信息。"""
+        try:
+            from config import proxy as proxy_cfg
+            result = proxy_cfg.refresh_proxy_subscription(force=True)
+            return jsonify({"ok": bool(result.get("ok")), **result, "status": proxy_cfg.proxy_subscription_status()})
+        except Exception as exc:
+            logger.exception("刷新代理订阅失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
 
     @app.post("/api/cloudmail/gen-token")
     def api_cloudmail_gen_token():

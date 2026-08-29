@@ -79,6 +79,26 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 clear_log=False,
                 existing_access_token=saved_token,
             )
+        # 查活成功后把新 AT 同步回 image.apisaver，避免图片账号池继续使用旧 token。
+        if result.get("ok") and result.get("access_token"):
+            try:
+                from config import image_api as image_cfg
+                if bool(getattr(image_cfg, "IMAGE_API_LIVE_CHECK_SYNC_IMAGE", True)):
+                    from core.image_account_export import auto_import_image_account
+                    sync = auto_import_image_account(
+                        result.get("access_token"), email=email, force=True,
+                    )
+                    result["image_sync"] = sync
+                    _append_log(
+                        email,
+                        f"[查活] image 账号 AT 同步完成：{sync.get('status_code', '-')}"
+                        if sync.get("ok") else
+                        f"[查活] image AT 同步跳过：{sync.get('reason', '-')}"
+                    )
+            except Exception as exc:
+                # image 同步失败不应把已经成功的查活标成失败；保留错误供日志排查。
+                result["image_sync"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                _append_log(email, f"[查活] image AT 同步失败：{result['image_sync']['error']}")
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")

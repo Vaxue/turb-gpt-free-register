@@ -1063,10 +1063,17 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
     if driver.__class__.__name__ == "CloakSeleniumDriver":
         try:
             from config import cloakbrowser as cloak_cfg
-            email_entry_timeout = max(20, int(getattr(cloak_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
+            selenium_timeout = int(getattr(cloak_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90)
+            challenge_timeout = int(getattr(cloak_cfg, "CLOAK_CHALLENGE_TIMEOUT", selenium_timeout) or selenium_timeout)
+            email_entry_timeout = max(20, selenium_timeout, challenge_timeout)
         except Exception:
             email_entry_timeout = 90
     for attempt in range(1, attempts + 1):
+        # 页面导航可能在上一轮等待返回后才完成；如果已经落到验证码页，
+        # 不要再次尝试查找/填写邮箱，直接交给后续 OTP 阶段。
+        if _is_email_verification_page(driver):
+            logger.info("%s 已处于邮箱验证码页，跳过重复填写邮箱", _log_prefix(driver))
+            return "otp"
         _type_email_address(driver, email, timeout=email_entry_timeout)
         state = _email_input_value_state(driver)
         last_state = state
@@ -1079,7 +1086,26 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         human_delay("form")
         _submit_email_step(driver, email)
         logger.info("%s 已提交邮箱，等待进入密码页或验证码页（%s/%s）", _log_prefix(driver), attempt, attempts)
-        state_name = _wait_email_submit_next_state(driver, email, timeout=20)
+        next_state_timeout = 30
+        try:
+            if driver.__class__.__name__ == "CloakSeleniumDriver":
+                from config import cloakbrowser as cloak_cfg
+                next_state_timeout = max(
+                    next_state_timeout,
+                    int(getattr(cloak_cfg, "CLOAK_CHALLENGE_TIMEOUT", 150) or 150),
+                )
+            else:
+                next_state_timeout = max(
+                    next_state_timeout,
+                    int(getattr(_cfg, "ROXY_CHALLENGE_TIMEOUT", 150) or 150),
+                )
+        except Exception:
+            pass
+        state_name = _wait_email_submit_next_state(driver, email, timeout=next_state_timeout)
+        # 兼容 Selenium 在异步导航边界上短暂返回 unknown 的情况：
+        # 二次检查 URL/DOM，避免下一轮把验证码页误当成邮箱页。
+        if state_name == "unknown" and _is_email_verification_page(driver):
+            state_name = "otp"
         if state_name == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
@@ -1158,9 +1184,12 @@ def _type_otp(driver, code: str) -> None:
     # OTP 页面上下文已经由上游确认，普通可见 text 输入框可作为最后兜底。
     plain = []
     for e in boxes:
-        typ = str(e.get_attribute("type") or "text").lower()
-        attrs = " ".join(str(e.get_attribute(k) or "") for k in ("name", "id", "placeholder", "aria-label", "autocomplete")).lower()
-        if typ in ("text", "number") and not any(x in attrs for x in ("email", "e-mail", "password")):
+        typ = str(e.get_attribute("type") or "text").strip().lower()
+        attrs = " ".join(str(e.get_attribute(k) or "") for k in ("name", "id", "placeholder", "aria-label", "autocomplete", "inputmode")).lower()
+        # React/ARIA 页面有时省略 type 或使用动态属性；只排除明确的密码字段。
+        # 此阶段上游已经确认是 OTP 页面，因此唯一剩余可见输入框就是验证码框。
+        is_password = typ == "password" or any(x in attrs for x in ("password", "passwd", "new-password", "current-password", "密码"))
+        if not is_password and typ not in ("hidden", "email"):
             plain.append(e)
     if len(plain) == 1:
         _human_type_text(driver, plain[0], code, clear=True)
@@ -1168,6 +1197,19 @@ def _type_otp(driver, code: str) -> None:
     if len(plain) == len(code) and len(code) > 1:
         for e, ch in zip(plain, code):
             _human_type_text(driver, e, ch, clear=True)
+        return
+
+    # 最后兜底：部分 WebDriver 实现对 type 的返回值不稳定，但候选列表中
+    # 只有一个非密码可见 input 时仍应直接使用它。
+    non_password = []
+    for e in boxes:
+        typ = str(e.get_attribute("type") or "").strip().lower()
+        attrs = " ".join(str(e.get_attribute(k) or "") for k in ("name", "placeholder", "aria-label", "autocomplete")).lower()
+        if typ != "password" and not any(x in attrs for x in ("password", "passwd", "new-password", "current-password", "密码")):
+            non_password.append(e)
+    if len(non_password) == 1:
+        logger.info("%s OTP 使用唯一非密码可见输入框作为兜底", _log_prefix(driver))
+        _human_type_text(driver, non_password[0], code, clear=True)
         return
 
     summary = []
@@ -1805,6 +1847,146 @@ def _click_continue_with_password_if_present(driver) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
+def _password_value_state(driver) -> dict:
+    """读取当前密码控件的 DOM 值，避免把密码内容写入日志。"""
+    try:
+        return driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const inputs = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
+          .filter(visible)
+          .map(el => ({length: String(el.value || '').length, disabled: !!el.disabled, readOnly: !!el.readOnly}));
+        return {inputs, length: inputs[0]?.length || 0};
+        """) or {}
+    except Exception as exc:
+        return {error: f"{type(exc).__name__}: {exc}"}
+
+
+def _set_password_value_js(driver, password: str) -> dict:
+    """用原生 value setter 同步受控输入框，再派发完整输入事件链。"""
+    try:
+        return driver.execute_script(r"""
+        const value = String(arguments[0] || '');
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+          && !el.disabled && !el.readOnly;
+        const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
+          .find(visible);
+        if (!input) return {ok:false, reason:'missing_password_input'};
+        input.scrollIntoView({block:'center', inline:'nearest'});
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        try { input.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:value})); } catch (_) {}
+        if (setter) setter.call(input, value); else input.value = value;
+        try { input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value})); } catch (_) {
+          input.dispatchEvent(new Event('input', {bubbles:true}));
+        }
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        return {ok:true, length:String(input.value || '').length, active:document.activeElement === input};
+        """, password) or {}
+    except Exception as exc:
+        return {ok:false, reason:f"{type(exc).__name__}: {exc}"}
+
+
+def _fill_password_verified(driver, password: str, *, attempts: int = 3) -> dict:
+    """填充密码并验证 DOM value；每次重试都重新定位元素，兼容 React 重渲染。"""
+    expected = len(str(password))
+    last = {}
+    for attempt in range(1, max(1, attempts) + 1):
+        # 先走 locator/键盘路径，让 React 收到 trusted input 事件；节点被重建时
+        # 每轮都会重新定位，避免复用旧 ElementHandle。
+        try:
+            el = _find_any(driver, [
+                "input[name='new-password']",
+                "input[autocomplete='new-password']",
+                "input[type='password']",
+                "input[name*='password' i]",
+            ], timeout=3)
+            fill = getattr(el, "fill", None)
+            if callable(fill) and el.__class__.__name__ == "CloakElement":
+                fill(password)
+            else:
+                _human_type_text(driver, el, password, clear=True)
+        except Exception as exc:
+            last = {"ok": False, "reason": f"keyboard:{type(exc).__name__}: {exc}"}
+        time.sleep(0.25 * attempt)
+        state = _password_value_state(driver)
+        length = int(state.get('length') or 0)
+        logger.info(
+            "%s 密码输入校验：attempt=%s/%s length=%s expected=%s detail=%s",
+            _log_prefix(driver), attempt, attempts, length, expected,
+            {k: v for k, v in last.items() if k != 'value'},
+        )
+        if length == expected:
+            return {"ok": True, "attempt": attempt, "length": length}
+
+        # 键盘事件未被页面接收时，再用原生 setter + input/change 做兜底。
+        last = _set_password_value_js(driver, password)
+        time.sleep(0.35 * attempt)
+        state = _password_value_state(driver)
+        length = int(state.get('length') or 0)
+        if length == expected:
+            logger.info("%s 密码键盘兜底校验通过：attempt=%s length=%s", _log_prefix(driver), attempt, length)
+            return {"ok": True, "attempt": attempt, "length": length, "mode": "keyboard_fallback"}
+        logger.warning(
+            "%s 密码输入仍未稳定：attempt=%s length=%s expected=%s last=%s",
+            _log_prefix(driver), attempt, length, expected,
+            {k: v for k, v in last.items() if k not in {'value', 'password'}},
+        )
+    return {"ok": False, "reason": "password_value_not_stable", "expected": expected, "last": last, "state": _password_value_state(driver)}
+
+
+def _submit_password_form_current(driver) -> dict:
+    """重新定位当前密码表单并异步提交，避免返回已失效的 ElementHandle。"""
+    try:
+        return driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const enabled = el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+        const pass = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
+          .find(el => enabled(el) && !el.readOnly);
+        if (!pass) return {ok:false, reason:'missing_password_input'};
+        const form = pass.closest('form') || document.querySelector('form');
+        const scope = form || document;
+        const candidates = [...scope.querySelectorAll('button,input[type="submit"],[role="button"]')].filter(enabled);
+        const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
+        const scored = candidates.map((el, idx) => {
+          const attrs = [el.type, el.getAttribute('data-dd-action-name'), el.getAttribute('aria-label'), el.name, el.value, el.textContent].join(' ').toLowerCase();
+          let score = (String(el.type).toLowerCase() === 'submit' ? 80 : 0);
+          if (/continue|next|submit|create|続行|続ける/.test(attrs) || /continue|next|submit|create|続行|続ける/.test(norm(el.textContent))) score += 50;
+          return {el, idx, score};
+        }).sort((a,b) => b.score - a.score || a.idx - b.idx);
+        const target = scored[0]?.el;
+        if (!target) return {ok:false, reason:'missing_enabled_submit'};
+        target.scrollIntoView({block:'center'});
+        setTimeout(() => {
+          try {
+            if (form?.requestSubmit) form.requestSubmit(target);
+            else target.click();
+          } catch (_) { try { target.click(); } catch (_) {} }
+        }, 80);
+        return {ok:true, text:(target.textContent || target.value || '').trim().slice(0,80), type:target.type || '', disabled:!!target.disabled};
+        """) or {}
+    except Exception as exc:
+        return {ok:false, reason:f"{type(exc).__name__}: {exc}"}
+
+
+def _click_password_submit_direct(driver) -> dict:
+    """Cloak 优先走当前 locator 的原生 click，触发 React 的 onClick 链路。"""
+    if driver.__class__.__name__ != "CloakSeleniumDriver":
+        return {"ok": False, "reason": "not_cloak"}
+    try:
+        button = _find_any(driver, [
+            "input[name='new-password'] ~ button[type='submit']",
+            "button[type='submit']",
+            "input[type='submit']",
+        ], timeout=3)
+        button.click()
+        return {"ok": True, "mode": "locator_click", "text": str(button.get_attribute("aria-label") or "")[:80]}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
     end = time.time() + timeout
@@ -1865,14 +2047,35 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
         buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
+        return {ok:true, reason:'password_targets', hasInput:true, hasSubmit:true};
         """) or {}
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        _human_type_text(driver, result.get("input"), password, clear=True)
+        fill_result = _fill_password_verified(driver, password, attempts=3)
+        if not fill_result.get('ok'):
+            raise RuntimeError(f"密码页输入失败：{fill_result} state={last}")
         # React/Auth0 会在 input/change 后异步校验密码强度并启用 Continue。
         # 之前输入完 0.4~1.4s 就点，偶发点在按钮还未真正可提交/事件未绑定完成时，页面无反应。
         human_delay("form", minimum=2.0, maximum=3.6)
+        # 异步校验期间 React 可能重建 input 并丢失 value；点击 Continue 前再做一次
+        # 最终校验，确保提交的确实是完整密码而不是空值。
+        final_password_state = _password_value_state(driver)
+        logger.warning(
+            "%s 密码提交前最终状态：length=%s expected=%s",
+            _log_prefix(driver), final_password_state.get('length', 0), len(password),
+        )
+        if int(final_password_state.get('length') or 0) != len(password):
+            logger.warning(
+                "%s 密码等待后值被重置，重新填写：length=%s expected=%s",
+                _log_prefix(driver), final_password_state.get('length', 0), len(password),
+            )
+            fill_result = _fill_password_verified(driver, password, attempts=3)
+            if not fill_result.get('ok'):
+                raise RuntimeError(f"密码页最终输入失败：{fill_result} state={_password_page_state(driver)}")
+            human_delay("form", minimum=1.0, maximum=1.8)
+            final_password_state = _password_value_state(driver)
+            if int(final_password_state.get('length') or 0) != len(password):
+                raise RuntimeError(f"密码页最终校验失败：{final_password_state} state={_password_page_state(driver)}")
         submit_result = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
@@ -1904,19 +2107,22 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         return {
           ok:true,
           reason:'enabled_submit_target',
-          button: target,
           text: (target.textContent || target.getAttribute('value') || '').trim().slice(0, 80),
           type: target.getAttribute('type') || '',
           dd: target.getAttribute('data-dd-action-name') || '',
           ariaDisabled: target.getAttribute('aria-disabled') || ''
         };
         """) or {}
-        if not submit_result.get("ok") or not submit_result.get("button"):
+        if not submit_result.get("ok"):
             raise RuntimeError(f"密码页找不到可点击的 Continue 按钮：{submit_result} state={_password_page_state(driver)}")
-        _human_click(driver, submit_result.get("button"), label="password_submit")
-        logger.info("%s 已填写并点击密码页 Continue：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
+        # React 重渲染可能让上面返回的 ElementHandle 失效；重新查询当前表单后异步提交。
+        direct_submit = _click_password_submit_direct(driver)
+        current_submit = direct_submit if direct_submit.get("ok") else _submit_password_form_current(driver)
+        if not current_submit.get("ok"):
+            raise RuntimeError(f"密码页当前表单提交失败：{current_submit} state={_password_page_state(driver)}")
+        logger.info("%s 已填写并提交密码页 Continue：detail=%s", _log_prefix(driver), current_submit)
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
-        wait_end = time.time() + 20
+        wait_end = time.time() + 50
         retried_submit = False
         while time.time() < wait_end:
             if _is_email_verification_page(driver):
@@ -1925,12 +2131,15 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             if _has_access_token(driver):
                 logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
                 return password
-            if not retried_submit and time.time() > wait_end - 15 and _is_signup_password_page(driver):
+            if not retried_submit and time.time() > wait_end - 42 and _is_signup_password_page(driver):
                 retried_submit = True
                 logger.info("%s 密码页点击后仍未跳转，等待后重试一次 Continue/Enter", _log_prefix(driver))
                 human_delay("form", minimum=1.2, maximum=2.2)
                 try:
-                    _click_continue(driver)
+                    _fill_password_verified(driver, password, attempts=2)
+                    retry_direct = _click_password_submit_direct(driver)
+                    if not retry_direct.get("ok"):
+                        _submit_password_form_current(driver)
                 except Exception:
                     try:
                         from selenium.webdriver.common.keys import Keys
@@ -1940,6 +2149,8 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             if not _is_signup_password_page(driver):
                 return password
             time.sleep(0.5)
+        if _is_signup_password_page(driver):
+            raise RuntimeError(f"密码页提交后未跳转，仍停留在 create-account/password：state={_password_page_state(driver)}")
         return password
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None

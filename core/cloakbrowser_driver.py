@@ -72,9 +72,24 @@ class CloakElement:
                 self.handle.fill("", timeout=10000)
         except Exception:
             # 部分非 input 元素不支持 fill，回退键盘清空。
-            self.click()
-            self.page.keyboard.press("Meta+A")
-            self.page.keyboard.press("Backspace")
+            try:
+                if self.locator is not None:
+                    self.locator.press("Control+A", timeout=10000)
+                    self.locator.press("Backspace", timeout=10000)
+                else:
+                    self.handle.press("Control+A", timeout=10000)
+                    self.handle.press("Backspace", timeout=10000)
+            except Exception:
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.press("Backspace")
+
+    def fill(self, value: str) -> None:
+        """Expose Playwright's controlled-input compatible fill for shared flows."""
+        text = str(value or "")
+        if self.locator is not None:
+            self.locator.fill(text, timeout=10000)
+        else:
+            self.handle.fill(text, timeout=10000)
 
     @property
     def tag_name(self) -> str:
@@ -87,24 +102,57 @@ class CloakElement:
         # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')。
         text = "".join(str(v or "") for v in values)
         lower = text.lower()
-        try:
-            self.click()
-        except Exception:
-            pass
-        if "\ue03d" in text or "\ue009" in text or "command" in lower or "control" in lower:
-            # Selenium Keys.CONTROL/COMMAND 编码可能传入私有区字符；这里按全选处理。
+        if text in ("\ue03d", "command", "COMMAND") or text in ("\ue03da", "commanda", "COMMANDA"):
+            key = "Meta+A"
             try:
-                self.page.keyboard.press("Meta+A")
+                if self.locator is not None:
+                    self.locator.press(key, timeout=10000)
+                else:
+                    self.handle.press(key, timeout=10000)
             except Exception:
-                self.page.keyboard.press("Control+A")
+                self.page.keyboard.press(key)
+            return
+        if text in ("\ue009", "control", "CONTROL", "\ue009a", "controla", "CONTROLa"):
+            key = "Control+A"
+            try:
+                if self.locator is not None:
+                    self.locator.press(key, timeout=10000)
+                else:
+                    self.handle.press(key, timeout=10000)
+            except Exception:
+                self.page.keyboard.press(key)
+            return
+        # Selenium 特殊键使用私有区编码；不要把它们当普通文字输入。
+        special_keys = {
+            "\ue003": "Backspace",
+            "\ue004": "Tab",
+            "\ue007": "Enter",
+            "\ue008": "Shift",
+            "\ue009": "Control",
+            "\ue00d": "Delete",
+            "\ue00c": "Escape",
+        }
+        if text in special_keys:
+            try:
+                if self.locator is not None:
+                    self.locator.press(special_keys[text], timeout=10000)
+                else:
+                    self.handle.press(special_keys[text], timeout=10000)
+            except Exception:
+                self.page.keyboard.press(special_keys[text])
             return
         try:
+            # send_keys 可能由上层逐字符调用；fill() 会覆盖已有值，导致
+            # 邮箱最终只剩最后一个字符。键盘输入会保留当前 caret 内容并
+            # 触发 React 所需的真实 keyboard/input 事件。
             if self.locator is not None:
-                self.locator.fill(text, timeout=10000)
+                self.locator.press_sequentially(text, delay=0, timeout=10000)
             else:
-                self.handle.fill(text, timeout=10000)
+                self.handle.press_sequentially(text, delay=0, timeout=10000)
         except Exception:
-            self.page.keyboard.type(text, delay=35)
+            # 极少数 Cloak 版本没有 press_sequentially 时，元素仍已由
+            # 上层聚焦，回退到页面键盘输入。
+            self.page.keyboard.type(text, delay=0)
 
     def get_attribute(self, name: str) -> str | None:
         try:
@@ -251,25 +299,67 @@ class CloakSeleniumDriver:
 
     @staticmethod
     def _unwrap_js_result(page, handle: Any) -> Any:
+        """将 evaluate_handle 的结果转换为 Selenium 风格值。
+
+        Selenium 脚本经常返回 ``{target: button, ...}`` 或数组中携带 DOM
+        元素。Playwright 对这种 JSHandle 直接调用 ``json_value`` 时会把
+        元素变成普通对象，后续调用 ``scrollIntoView``/``click`` 就会失败。
+        递归读取对象属性，保留所有嵌套 ElementHandle。
+        """
+        def walk(current: Any) -> Any:
+            try:
+                element = current.as_element()
+            except Exception:
+                element = None
+            if element is not None:
+                # 不 dispose 元素句柄；CloakElement 后续还要继续使用它。
+                return CloakElement(page, handle=element)
+
+            # 对象/数组先读取属性，避免 json_value 把内部 DOM 元素抹掉。
+            try:
+                properties = current.get_properties()
+            except Exception:
+                properties = {}
+            if properties:
+                try:
+                    is_array = bool(current.evaluate("value => Array.isArray(value)"))
+                except Exception:
+                    is_array = False
+                if is_array:
+                    indexed = {}
+                    for key, child in properties.items():
+                        if str(key).isdigit():
+                            indexed[int(key)] = walk(child)
+                        else:
+                            try:
+                                child.dispose()
+                            except Exception:
+                                pass
+                    result = [indexed[i] for i in range(max(indexed) + 1)] if indexed else []
+                else:
+                    result = {str(key): walk(child) for key, child in properties.items()}
+                try:
+                    current.dispose()
+                except Exception:
+                    pass
+                return result
+
+            try:
+                return current.json_value()
+            finally:
+                try:
+                    current.dispose()
+                except Exception:
+                    pass
+
         try:
-            element = handle.as_element()
-        except Exception:
-            element = None
-        if element is not None:
-            return CloakElement(page, handle=element)
-        try:
-            return handle.json_value()
+            return walk(handle)
         except Exception as exc:
             msg = str(exc)
             if "Execution context was destroyed" in msg or "navigation" in msg.lower():
                 logger.info("[Cloak] JS 执行后页面发生跳转，忽略返回值读取失败：%s", msg[:160])
                 return {"ok": True, "reason": "navigation_after_script"}
             raise
-        finally:
-            try:
-                handle.dispose()
-            except Exception:
-                pass
 
     def _evaluate(self, script: str, args: tuple[Any, ...], async_mode: bool) -> Any:
         first_el, serial_args = self._serialize_args(args)
@@ -309,10 +399,27 @@ class CloakSeleniumDriver:
           const fn = new Function(...args.map((_, i) => 'a' + i), payload.script);
           return fn(...args);
         }"""
-        if first_el is not None:
-            handle = first_el._eval_handle(element_wrapper, {"script": script, "args": serial_args})
-        else:
-            handle = self.page.evaluate_handle(wrapper, {"script": script, "args": serial_args})
+        # Managed Challenge/SPA 导航可能恰好发生在 evaluate_handle 创建句柄的
+        # 窗口内。重试短暂的导航竞争，避免把正常跳转报告成注册失败。
+        handle = None
+        for attempt in range(3):
+            try:
+                if first_el is not None:
+                    handle = first_el._eval_handle(element_wrapper, {"script": script, "args": serial_args})
+                else:
+                    handle = self.page.evaluate_handle(wrapper, {"script": script, "args": serial_args})
+                break
+            except Exception as exc:
+                msg = str(exc)
+                is_navigation = "Execution context was destroyed" in msg or "navigation" in msg.lower()
+                if not is_navigation or attempt >= 2:
+                    if is_navigation:
+                        logger.info("[Cloak] JS 执行期间页面导航完成，忽略脚本返回值：%s", msg[:160])
+                        return {"ok": True, "reason": "navigation_after_script"}
+                    raise
+                time.sleep(0.25 * (attempt + 1))
+        if handle is None:
+            return {"ok": True, "reason": "navigation_after_script"}
         return self._unwrap_js_result(self.page, handle)
 
 
@@ -321,6 +428,51 @@ def _normalize_proxy(proxy: str | None) -> str | None:
     if not proxy:
         return None
     return proxy.replace("socks5h://", "socks5://")
+
+
+def _proxy_log_value(proxy_url: str | None) -> str:
+    """Return a proxy URL with credentials removed for logs."""
+    if not proxy_url:
+        return ""
+    return re.sub(r"(://)([^/@:]+)(?::[^/@]*)?@", r"\1***:***@", proxy_url)
+
+
+def _proxy_is_reachable(proxy_url: str | None) -> bool:
+    """Probe a proxy before handing it to Chromium.
+
+    A dead CONNECT tunnel makes Chromium fail every navigation with
+    ERR_TUNNEL_CONNECTION_FAILED. Treat that as a per-session proxy failure
+    and let CloakBrowser start without a proxy instead.
+    """
+    if not proxy_url:
+        return True
+    try:
+        import requests
+
+        timeout = float(getattr(_cfg, "CLOAK_PROXY_PRECHECK_TIMEOUT", 8) or 8)
+        response = requests.get(
+            "https://example.com/",
+            headers={"User-Agent": "Mozilla/5.0"},
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=max(2.0, timeout),
+            allow_redirects=True,
+        )
+        if response.status_code >= 500:
+            logger.warning(
+                "[Cloak] 代理预检返回 HTTP %s，回退直连：%s",
+                response.status_code,
+                _proxy_log_value(proxy_url),
+            )
+            return False
+        return True
+    except Exception as exc:
+        logger.warning(
+            "[Cloak] 代理预检失败，回退直连：%s (%s: %s)",
+            _proxy_log_value(proxy_url),
+            type(exc).__name__,
+            str(exc).splitlines()[0][:240],
+        )
+        return False
 
 
 def _detect_cloak_exit_geo(proxy_url: str | None = None) -> dict:
@@ -415,7 +567,14 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if seed:
         launch_args.append(f"--fingerprint={seed}")
 
+    # CloakBrowser 目前使用 socks5:// 参数；预检则保留调用方的 socks5h://，
+    # 让 DNS 在 Mihomo 端解析。Mihomo fake-ip/分流场景下改成 socks5://
+    # 会让 requests 在本地解析并稳定触发 SSLEOFError。
+    raw_proxy_url = str(proxy or "").strip()
     proxy_url = _normalize_proxy(proxy) if bool(getattr(_cfg, "CLOAK_USE_PROXY", True)) else None
+    precheck_proxy_url = raw_proxy_url or proxy_url
+    if proxy_url and bool(getattr(_cfg, "CLOAK_PROXY_PRECHECK", True)) and not _proxy_is_reachable(precheck_proxy_url):
+        proxy_url = None
     locale_opts = _build_cloak_locale_options(proxy_url)
     # geoip=True 交给 CloakBrowser 根据当前出口 IP 自动匹配 timezone/locale/WebRTC。
     # 之前只有显式 proxy_url 时才开启；如果用户走系统代理/VPN/透明代理，代码层面

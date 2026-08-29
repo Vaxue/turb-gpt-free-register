@@ -15,11 +15,12 @@ def auto_import_image_account(
     *,
     email: str | None = None,
     timeout: float | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """调用 chatgpt2api 管理接口导入一个账号并刷新其状态。"""
     from config import image_api as cfg
 
-    if not bool(getattr(cfg, "IMAGE_API_AUTO_IMPORT", False)):
+    if not force and not bool(getattr(cfg, "IMAGE_API_AUTO_IMPORT", False)):
         return {"ok": False, "skipped": True, "reason": "disabled"}
 
     token = str(access_token or "").strip()
