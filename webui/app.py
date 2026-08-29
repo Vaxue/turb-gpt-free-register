@@ -399,6 +399,16 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
 
+    @app.post("/api/image/cleanup-failed")
+    def api_image_cleanup_failed():
+        """手动执行失败账号及临时邮箱清理。"""
+        try:
+            from core.image_quota_monitor import cleanup_failed_accounts
+            result = cleanup_failed_accounts(force=True)
+            return jsonify(result), (200 if result.get("ok") else 500)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
     # ----------------------------------------------------------
     # 已注册账号
     # ----------------------------------------------------------
