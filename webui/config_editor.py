@@ -733,6 +733,22 @@ EDITABLE_FIELDS = [
         "key": "IMAGE_API_LIVE_CHECK_SYNC_IMAGE", "file": "image_api.py", "type": "bool", "group": "image额度监控",
         "label": "查活后同步 image AT", "help": "查活成功后把最新 access token 更新到 image.apisaver 账号池",
     },
+    {
+        "key": "IMAGE_API_LIVE_CHECK_DELETE_FAILED", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "查活失败自动删除账号和邮箱", "help": "持续失败或已废账号从本地账号池删除，并调用 mail.apisaver 管理接口删除邮箱",
+    },
+    {
+        "key": "IMAGE_API_LIVE_CHECK_DELETE_FAILURE_THRESHOLD", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "失败删除阈值", "help": "连续查活失败达到该次数后才删除，避免一次网络抖动误删",
+    },
+    {
+        "key": "IMAGE_API_MIDNIGHT_CLEANUP_ENABLED", "file": "image_api.py", "type": "bool", "group": "image额度监控",
+        "label": "每日定时清理失败账号", "help": "每天指定时刻清理达到失败阈值或已废的账号及对应邮箱",
+    },
+    {
+        "key": "IMAGE_API_MIDNIGHT_CLEANUP_HOUR", "file": "image_api.py", "type": "int", "group": "image额度监控",
+        "label": "每日清理小时", "help": "服务器本地时间 0-23，默认 0 表示午夜 00:00",
+    },
     # ---- mail.apisaver 失败邮箱清理 ----
     {
         "key": "MAIL_ADMIN_DELETE_FAILED", "file": "email.py", "type": "bool", "group": "邮箱 / OTP",
