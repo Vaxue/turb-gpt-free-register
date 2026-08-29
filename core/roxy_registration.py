@@ -575,6 +575,47 @@ def _click_email_entry_option(driver) -> bool:
     return False
 
 
+def _is_chatgpt_signup_shell(driver) -> bool:
+    """识别 ChatGPT 已加载但认证表单尚未挂载的欢迎壳。"""
+    try:
+        return bool(driver.execute_script(r"""
+        const url = String(location.href || '').toLowerCase();
+        if (!url.includes('chatgpt.com')) return false;
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const attrs = [...document.querySelectorAll('button,a,[role="button"]')]
+          .filter(visible).map(el => [el.id, el.className, el.getAttribute('data-testid'),
+            el.getAttribute('data-test-id'), el.getAttribute('href')].filter(Boolean).join(' ').toLowerCase());
+        return /(?:^|[\s_-])signup(?:-|_|\s|$)/.test(attrs.join(' '))
+          || (/(?:\?|&)slm=1(?:&|$)/.test(url) && !document.querySelector(
+            'input[type="email"],input[name="email"],input[name="username"],input[autocomplete="email"]'));
+        """))
+    except Exception:
+        return False
+
+
+def _recover_chatgpt_email_entry(driver) -> bool:
+    """从欢迎壳恢复认证路由；仅执行一次，避免在 SPA 壳上空转。"""
+    try:
+        if not _is_chatgpt_signup_shell(driver):
+            return False
+        current = str(getattr(driver, 'current_url', '') or '')
+        logger.info("%s 检测到 ChatGPT 欢迎壳，恢复邮箱认证路由：url=%s", _log_prefix(driver), current)
+        # 直接导航比点击壳上的 React 按钮更稳定，尤其是壳只剩文件上传控件时。
+        _safe_get(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=min(35, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+        time.sleep(1.2)
+        return True
+    except Exception as exc:
+        logger.warning("%s 欢迎壳恢复认证路由失败：%s", _log_prefix(driver), str(exc)[:180])
+        return False
+
+
 def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     """进入邮箱登录/注册方式并填写邮箱。全程不依赖页面可见文字，避免非日本出口本地化后误点 Google。"""
     end = time.time() + (timeout or int(_cfg.ROXY_SELENIUM_TIMEOUT))
@@ -582,6 +623,7 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     clicked_email_option = False
     challenge_seen = False
     challenge_log_at = 0.0
+    shell_recovered = False
     while time.time() < end:
         # Redirects to OTP/password can complete while the previous page is
         # still being painted. Stop looking for an email input immediately;
@@ -606,6 +648,9 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
                 _poke_cloudflare_challenge(driver)
                 challenge_log_at = time.time()
             time.sleep(1.0)
+            continue
+        if not shell_recovered and _recover_chatgpt_email_entry(driver):
+            shell_recovered = True
             continue
         if challenge_seen:
             logger.info("%s Cloudflare challenge 状态已清除，继续查找邮箱输入框", _log_prefix(driver))
@@ -1465,6 +1510,20 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
         return 'accepted'
     logger.warning("%s[OTP] 验证码页状态不明确，按 pending 处理：url=%s snapshot=%s", _log_prefix(driver), final_url, last)
     return 'pending'
+
+
+def _otp_acceptance_is_stable(driver, settle: float = 1.4) -> bool:
+    """确认 OTP 跳转没有在短暂路由切换后回到验证码页。"""
+    deadline = time.time() + max(0.6, settle)
+    while time.time() < deadline:
+        if _is_email_verification_page(driver):
+            return False
+        time.sleep(0.25)
+    try:
+        url = str(getattr(driver, 'current_url', '') or '').lower()
+    except Exception:
+        url = ''
+    return not ('email-verification' in url or _is_email_verification_page(driver))
 
 
 def _click_continue(driver) -> None:
@@ -2668,7 +2727,13 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
 
             outcome = _wait_after_email_otp_submit(driver, timeout=30)
             if outcome == 'accepted':
-                break
+                # Auth SPA sometimes reports a profile route for one poll and
+                # then restores the verification form while the callback is
+                # still pending. Do not enter profile handling in that race.
+                if _otp_acceptance_is_stable(driver):
+                    break
+                logger.warning("%s[OTP] 跳转未稳定，页面重新回到验证码页，保留当前验证码继续等待", _log_prefix(driver))
+                outcome = 'pending'
             if outcome == 'pending' and otp_attempt < max_otp_attempts:
                 # A slow auth callback can outlive the first wait window.
                 # Give the same submitted code another observation window
@@ -2677,7 +2742,10 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 logger.warning("%s[OTP] 未确认跳转，继续等待当前验证码回调后再决定是否重发", _log_prefix(driver))
                 outcome = _wait_after_email_otp_submit(driver, timeout=20)
                 if outcome == 'accepted':
-                    break
+                    if _otp_acceptance_is_stable(driver):
+                        break
+                    logger.warning("%s[OTP] 延迟回调仍未稳定，继续按 pending 处理", _log_prefix(driver))
+                    outcome = 'pending'
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             logger.warning("[Roxy注册][OTP] 验证码错误/过期，准备重新发送并重新获取验证码（%s/%s）", otp_attempt + 1, max_otp_attempts)
@@ -2689,6 +2757,13 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         # about-you / profile 信息页：必须完成或确认已有登录态，不能静默跳过。
         logger.info("[Roxy注册] 开始等待资料页/登录态")
         _check_manual_stop()
+        if _is_email_verification_page(driver):
+            # Defensive guard for late callback races. The OTP loop should
+            # normally consume this state; keeping the error explicit avoids
+            # the misleading profile-timeout diagnosis.
+            raise RuntimeError(
+                f"OTP 提交后仍停留验证码页，未进入资料页：state={_email_otp_page_state(driver)}"
+            )
         profile_submitted = _complete_profile_page(driver, name, birthday, timeout=60)
         if profile_submitted:
             create_acknowledged = True
