@@ -154,7 +154,7 @@ def prepare_registration_inputs() -> tuple[str, str, str]:
     return email, name, birthday
 
 
-def run_registration(
+def _run_registration_once(
     email: str,
     name: str,
     birthday: str | None = None,
@@ -570,6 +570,51 @@ def run_registration(
         except Exception:
             pass
         return {"success": False, "email": email, "error": str(e)}
+
+
+def _protocol_retryable_error(error: object) -> bool:
+    text = str(error or '').lower()
+    markers = (
+        'http error 403', 'http error 429', 'timeout', 'timed out',
+        'connection reset', 'connection aborted', 'sslerror', 'ssl_',
+        'proxyerror', 'proxy', 'cloudflare', 'challenge', 'eof',
+        'renderer', 'temporarily unavailable', '502', '503', '504',
+    )
+    return any(marker in text for marker in markers)
+
+
+def run_registration(
+    email: str,
+    name: str,
+    birthday: str | None = None,
+    proxy: str = None,
+    otp_code: str = None,
+    batch_dir=None,
+):
+    """协议注册包装器：网络型失败自动换订阅出口重试一次。"""
+    max_attempts = 2
+    result = None
+    selected_proxy = proxy
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            try:
+                selected_proxy = None
+                from config import proxy as proxy_cfg
+                proxy_cfg.refresh_proxy_subscription(force=True)
+                selected_proxy = proxy_cfg.pick_proxy()
+            except Exception as exc:
+                logger.warning('[注册] 刷新代理订阅失败，继续使用代理池随机节点：%s', str(exc)[:180])
+                selected_proxy = None
+            logger.warning('[注册] 网络型失败后切换出口重试：attempt=%s/%s proxy=%s', attempt, max_attempts, selected_proxy or 'direct')
+        result = _run_registration_once(
+            email=email, name=name, birthday=birthday, proxy=selected_proxy,
+            otp_code=(otp_code if attempt == 1 else None), batch_dir=batch_dir,
+        )
+        driver_mode = str(getattr(_roxy_cfg, 'REGISTRATION_DRIVER', 'protocol') or 'protocol').strip().lower()
+        if driver_mode not in ('protocol', 'api', 'http') or result.get('success') or attempt >= max_attempts or not _protocol_retryable_error(result.get('error')):
+            return result
+        time.sleep(min(8, 2 * attempt))
+    return result or {'success': False, 'email': email, 'error': 'protocol registration returned no result'}
 
 
 def main():
