@@ -1060,6 +1060,15 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
             # 仍是当前邮箱页，继续短等。
         time.sleep(0.8)
     logger.info("%s 邮箱提交后等待下一步超时，最后邮箱页状态=%s", _log_prefix(driver), last)
+    # Authorization is an asynchronous SPA transition. The URL may update
+    # just after the last DOM snapshot, so accept the explicit verification
+    # route before returning unknown and triggering an incorrect email retry.
+    try:
+        current_url = str(driver.current_url or '').lower()
+    except Exception:
+        current_url = ''
+    if 'email-verification' in current_url:
+        return "otp"
     return "email_page" if _is_email_login_page_still_present(driver) else "unknown"
 
 
@@ -1348,10 +1357,10 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
             logger.warning("%s[OTP] 提交后仍停留验证码页且存在错误标记，按验证码无效处理 snapshot=%s", _log_prefix(driver), last)
             return 'invalid'
         logger.warning(
-            "%s[OTP] 提交后 %ss 仍在验证码页但无错误标记，按跳转缓慢处理（accepted） snapshot=%s",
+            "%s[OTP] 提交后 %ss 仍在验证码页且无错误标记，按未完成处理并重新获取验证码 snapshot=%s",
             _log_prefix(driver), timeout, last
         )
-        return 'accepted'
+        return 'pending'
     return 'accepted'
 
 
