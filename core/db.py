@@ -1422,6 +1422,12 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
         row["live_check_ok"] = ok
         row["live_checked_at"] = result.get("checked_at") or now
         row["live_check_error"] = None if ok else result.get("error")
+        # Keep a consecutive failure counter so cleanup automation can
+        # distinguish a persistent dead account from a one-off network error.
+        if ok:
+            row["live_check_failed_count"] = 0
+        else:
+            row["live_check_failed_count"] = int(row.get("live_check_failed_count") or 0) + 1
         row["updated_at"] = now
 
         if ok:
