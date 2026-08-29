@@ -450,21 +450,36 @@ def _proxy_is_reachable(proxy_url: str | None) -> bool:
         import requests
 
         timeout = float(getattr(_cfg, "CLOAK_PROXY_PRECHECK_TIMEOUT", 8) or 8)
-        response = requests.get(
-            "https://example.com/",
-            headers={"User-Agent": "Mozilla/5.0"},
-            proxies={"http": proxy_url, "https": proxy_url},
-            timeout=max(2.0, timeout),
-            allow_redirects=True,
+        # Probe the actual registration hosts. Some providers block
+        # example.com, which previously discarded usable nodes and forced a
+        # direct connection into Cloudflare.
+        urls = getattr(_cfg, "CLOAK_PROXY_PRECHECK_URLS", None) or (
+            "https://chatgpt.com/", "https://auth.openai.com/"
         )
-        if response.status_code >= 500:
+        last_status = None
+        last_exc = None
+        for url in urls:
+            try:
+                response = requests.get(
+                    str(url), headers={"User-Agent": "Mozilla/5.0"},
+                    proxies={"http": proxy_url, "https": proxy_url},
+                    timeout=max(2.0, timeout), allow_redirects=False,
+                )
+                last_status = int(response.status_code)
+                # 2xx/3xx/4xx prove that the CONNECT tunnel works.
+                if last_status < 500:
+                    return True
+            except Exception as exc:
+                last_exc = exc
+        if last_status is not None:
+            logger.warning("[Cloak] 代理预检返回 HTTP %s，回退直连：%s", last_status, _proxy_log_value(proxy_url))
+        elif last_exc:
             logger.warning(
-                "[Cloak] 代理预检返回 HTTP %s，回退直连：%s",
-                response.status_code,
-                _proxy_log_value(proxy_url),
+                "[Cloak] 代理预检失败，回退直连：%s (%s: %s)",
+                _proxy_log_value(proxy_url), type(last_exc).__name__,
+                str(last_exc).splitlines()[0][:240],
             )
-            return False
-        return True
+        return False
     except Exception as exc:
         logger.warning(
             "[Cloak] 代理预检失败，回退直连：%s (%s: %s)",

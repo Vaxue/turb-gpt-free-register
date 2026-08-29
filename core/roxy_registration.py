@@ -445,13 +445,20 @@ def _is_cloudflare_challenge_page(driver) -> bool:
         const title = String(document.title || '').toLowerCase();
         const url = String(location.href || '').toLowerCase();
         const body = String(document.body?.innerText || '').toLowerCase();
-        const challengeNode = document.querySelector(
-          '[id*="challenge" i], [class*="challenge" i], iframe[src*="challenge" i], iframe[src*="turnstile" i], script[src*="challenge" i]'
-        );
+        // Cloudflare leaves hidden challenge scripts/nodes after success.
+        // Only a visible widget should keep registration blocked.
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const challengeNode = [...document.querySelectorAll(
+          '[id*="challenge" i], [class*="challenge" i], iframe[src*="challenge" i], iframe[src*="turnstile" i]'
+        )].find(visible);
+        const hasEmailInput = [...document.querySelectorAll(
+          'input[type="email"],input[name="email"],input[name="username"],input[autocomplete="email"]'
+        )].some(visible);
         return /just a moment|un instant|稍候|请稍候/.test(title)
           || /__cf_chl_|challenge-platform|challenges.cloudflare.com/.test(url)
           || !!challengeNode
-          || (/verify you are human|checking your browser|验证您是人类/.test(body) && !document.querySelector('input[type="email"],input[name="email"],input[name="username"],input[autocomplete="email"]'));
+          || (/verify you are human|checking your browser|验证您是人类/.test(body) && !hasEmailInput);
         """))
     except Exception:
         return False
@@ -2226,6 +2233,15 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         if _has_access_token(driver):
             logger.info('%s 已检测到登录态，资料页可能已跳过', _log_prefix(driver))
             return False
+        # A slow React navigation can leave the password form visible after
+        # the password helper returned. Recover instead of waiting for a
+        # profile page that cannot exist yet.
+        if _is_signup_password_page(driver):
+            try:
+                _fill_password_page_if_present(driver, name, timeout=min(20, max(8, int(end - time.time()))))
+            except Exception as exc:
+                logger.warning('%s 资料页等待期间仍在密码页，重新处理失败：%s', _log_prefix(driver), str(exc)[:220])
+            continue
         snap = _page_snapshot(driver)
         last_snapshot = snap
         if not _is_profile_like(snap):
