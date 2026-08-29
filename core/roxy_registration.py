@@ -2280,11 +2280,19 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
     today = date.today()
     age = today.year - int(y) - ((today.month, today.day) < (int(m), int(d)))
     last_snapshot = {}
+    next_session_probe = 0.0
+    last_empty_log = 0.0
     while time.time() < end:
         time.sleep(1)
-        if _has_access_token(driver):
-            logger.info('%s 已检测到登录态，资料页可能已跳过', _log_prefix(driver))
-            return False
+        # session fetch is an expensive cross-origin async call. Under a
+        # batch load, probing every second can starve the same browser's
+        # profile page; keep it as a periodic confirmation instead.
+        now = time.time()
+        if now >= next_session_probe:
+            next_session_probe = now + 4.0
+            if _has_access_token(driver):
+                logger.info('%s 已检测到登录态，资料页可能已跳过', _log_prefix(driver))
+                return False
         # A slow React navigation can leave the password form visible after
         # the password helper returned. Recover instead of waiting for a
         # profile page that cannot exist yet.
@@ -2295,9 +2303,20 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
                 logger.warning('%s 资料页等待期间仍在密码页，重新处理失败：%s', _log_prefix(driver), str(exc)[:220])
             continue
         snap = _page_snapshot(driver)
-        last_snapshot = snap
+        # Cloak can return an empty/navigation marker while React is moving
+        # between auth routes. Do not overwrite the useful diagnostic state
+        # or turn that short window into a profile timeout.
+        informative = isinstance(snap, dict) and any(
+            snap.get(key) for key in ('url', 'title', 'text', 'inputs', 'buttons', 'widgets')
+        )
+        if informative:
+            last_snapshot = snap
+        elif now - last_empty_log >= 10:
+            last_empty_log = now
+            logger.warning('%s 资料页快照暂为空，继续等待导航完成：snapshot=%s url=%s',
+                           _log_prefix(driver), snap, getattr(driver, 'current_url', ''))
         if not _is_profile_like(snap):
-            logger.info('%s 等待资料页中：url=%s', _log_prefix(driver), snap.get('url'))
+            logger.info('%s 等待资料页中：url=%s', _log_prefix(driver), (snap or {}).get('url'))
             continue
 
         logger.info('%s 检测到资料页，开始填写姓名生日：url=%s inputs=%s', _log_prefix(driver), snap.get('url'), snap.get('inputs'))
@@ -2340,7 +2359,19 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
                 return True
             time.sleep(1)
         logger.warning('%s 找不到可点击的资料页提交按钮 snapshot=%s', _log_prefix(driver), _page_snapshot(driver))
-    raise RuntimeError(f'等待/填写资料页超时，最后页面：{last_snapshot}')
+    # One final state check closes the race where the OAuth callback finishes
+    # just after the loop's last poll. A completed auth route is success even
+    # when the profile form was skipped by the server.
+    try:
+        final_url = str(getattr(driver, 'current_url', '') or '').lower()
+    except Exception:
+        final_url = ''
+    if _has_access_token(driver) or (
+        'chatgpt.com/' in final_url and '/auth/' not in final_url
+    ):
+        logger.info('%s 资料页等待结束时已确认登录态，跳过资料填写：url=%s', _log_prefix(driver), final_url)
+        return False
+    raise RuntimeError(f'等待/填写资料页超时，最后页面：{last_snapshot}; final_url={final_url}')
 
 
 def _click_if_enabled_submit(driver) -> bool:
