@@ -543,9 +543,20 @@ def _click_email_entry_option(driver) -> bool:
       .filter(visible)
       .map(el => ({el, attrs: attrText(el), hasLogo: !!el.querySelector('img,svg,use')}))
       .filter(x => good.test(x.attrs) && !bad.test(x.attrs) && !x.hasLogo);
-    if (candidates.length !== 1) return null;
-    candidates[0].el.scrollIntoView({block:'center'});
-    return candidates[0].el;
+    if (candidates.length === 1) {
+      candidates[0].el.scrollIntoView({block:'center'});
+      return candidates[0].el;
+    }
+    // ChatGPT's localized welcome screen can expose only the technical
+    // `?slm=1` entry link before React mounts the email form. It is an
+    // internal route, so it is safe to use as a narrow fallback.
+    const start = [...document.querySelectorAll('a[href]')].filter(visible)
+      .filter(el => /(?:\?|&)slm=1(?:&|$)/i.test(String(el.getAttribute('href') || '')));
+    if (start.length === 1) {
+      start[0].scrollIntoView({block:'center'});
+      return start[0];
+    }
+    return null;
     """)
     if target:
         _human_click(driver, target, label="email_entry")
@@ -561,6 +572,15 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     challenge_seen = False
     challenge_log_at = 0.0
     while time.time() < end:
+        # Redirects to OTP/password can complete while the previous page is
+        # still being painted. Stop looking for an email input immediately;
+        # the caller will re-check the destination and enter the right stage.
+        try:
+            route = str(getattr(driver, 'current_url', '') or '').lower()
+        except Exception:
+            route = ''
+        if 'email-verification' in route or '/create-account/password' in route:
+            return
         el = _find_visible_email_input_js(driver)
         if el:
             if challenge_seen:
@@ -1091,6 +1111,19 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
             logger.info("%s 已处于邮箱验证码页，跳过重复填写邮箱", _log_prefix(driver))
             return "otp"
         _type_email_address(driver, email, timeout=email_entry_timeout)
+        # The auth SPA can finish its redirect while the email helper is
+        # returning. Re-check the destination before validating an email input;
+        # otherwise an already-rendered OTP page is retried as a missing email
+        # page and eventually reported as an entry-selector failure.
+        if _is_email_verification_page(driver):
+            logger.info("%s 邮箱填写返回后已处于验证码页，跳过邮箱输入校验", _log_prefix(driver))
+            return "otp"
+        if _is_signup_password_page(driver):
+            logger.info("%s 邮箱填写返回后已处于密码页，跳过邮箱输入校验", _log_prefix(driver))
+            return "password"
+        if _has_access_token(driver):
+            logger.info("%s 邮箱填写返回后已检测到登录态", _log_prefix(driver))
+            return "logged_in"
         state = _email_input_value_state(driver)
         last_state = state
         values = [str(i.get("value") or "") for i in (state.get("inputs") or [])]
@@ -1378,8 +1411,11 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
                 '/about-you' in current_url
                 or '/profile' in current_url
                 or '/create-account/password' in current_url
-                or 'chatgpt.com/' in current_url and '/auth/' not in current_url
             )
+            # A bare chatgpt.com URL is also used as a transient redirect
+            # while auth.openai.com is still deciding the OTP result. Treat it
+            # as accepted only after the session endpoint confirms a token or
+            # the destination is an explicit profile route.
             if _has_access_token(driver) or known_next:
                 if time.time() - left_verification_at >= 0.8:
                     return 'accepted'
@@ -1404,7 +1440,17 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
             _log_prefix(driver), timeout, last
         )
         return 'pending'
-    return 'accepted'
+    # Leaving the OTP DOM without a token or explicit next route is a
+    # navigation race, not proof that verification succeeded. Keep the OTP
+    # loop alive so it can observe the callback or request a fresh code.
+    try:
+        final_url = str(getattr(driver, 'current_url', '') or '').lower()
+    except Exception:
+        final_url = ''
+    if _has_access_token(driver) or any(route in final_url for route in ('/about-you', '/profile', '/create-account/password')):
+        return 'accepted'
+    logger.warning("%s[OTP] 验证码页状态不明确，按 pending 处理：url=%s snapshot=%s", _log_prefix(driver), final_url, last)
+    return 'pending'
 
 
 def _click_continue(driver) -> None:
