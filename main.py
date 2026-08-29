@@ -569,7 +569,12 @@ def _run_registration_once(
                     logger.info(f"[邮箱:{src}] {email} 已恢复 available")
         except Exception:
             pass
-        return {"success": False, "email": email, "error": str(e)}
+        return {
+            "success": False,
+            "email": email,
+            "error": str(e),
+            "retryable": not create_acknowledged,
+        }
 
 
 def _protocol_retryable_error(error: object) -> bool:
@@ -611,7 +616,7 @@ def run_registration(
             otp_code=(otp_code if attempt == 1 else None), batch_dir=batch_dir,
         )
         driver_mode = str(getattr(_roxy_cfg, 'REGISTRATION_DRIVER', 'protocol') or 'protocol').strip().lower()
-        if driver_mode not in ('protocol', 'api', 'http') or result.get('success') or attempt >= max_attempts or not _protocol_retryable_error(result.get('error')):
+        if driver_mode not in ('protocol', 'api', 'http') or result.get('success') or not result.get('retryable', True) or attempt >= max_attempts or not _protocol_retryable_error(result.get('error')):
             return result
         time.sleep(min(8, 2 * attempt))
     return result or {'success': False, 'email': email, 'error': 'protocol registration returned no result'}
