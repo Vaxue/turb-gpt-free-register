@@ -1136,8 +1136,32 @@ def _type_otp(driver, code: str) -> None:
     from selenium.webdriver.common.by import By
 
     code = "".join(ch for ch in str(code or "") if ch.isdigit())
-    if not code:
-        raise RuntimeError("OTP 验证码为空或不含数字")
+    if len(code) != 6:
+        raise RuntimeError(f"OTP 验证码必须是 6 位数字，实际为 {len(code)} 位")
+
+    def fill_single(element) -> None:
+        # Numeric/text OTP controls may drop a leading zero during keyboard
+        # input. Prefer the browser adapter's fill path, then verify and use
+        # the native setter as a React-compatible fallback.
+        try:
+            if element.__class__.__name__ == "CloakElement":
+                element.fill(code)
+            else:
+                _human_type_text(driver, element, code, clear=True)
+        except Exception:
+            _human_type_text(driver, element, code, clear=True)
+        try:
+            length = int(driver.execute_script("return String(arguments[0].value || '').length", element) or 0)
+        except Exception:
+            length = 0
+        if length != 6:
+            driver.execute_script(r"""
+            const el = arguments[0], value = String(arguments[1]);
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(el, value); else el.value = value;
+            el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            """, element, code)
 
     # 邮箱验证码页由 React 异步渲染；高并发时 DOM 可能短暂没有任何 input。
     # 先等待控件出现，再进入特征匹配，避免 candidates=[] 的瞬时失败。
@@ -1169,7 +1193,7 @@ def _type_otp(driver, code: str) -> None:
     ]:
         els = [e for e in driver.find_elements(By.CSS_SELECTOR, selector) if _visible(e)]
         if len(els) == 1:
-            _human_type_text(driver, els[0], code, clear=True)
+            fill_single(els[0])
             return
 
     # 6 个分格输入框。新版页面有时只使用普通 text input，靠 maxlength/aria-label
@@ -1194,7 +1218,7 @@ def _type_otp(driver, code: str) -> None:
     # React/ARIA 实现可能使用 contenteditable 作为验证码控件。
     editable = [e for e in driver.find_elements(By.CSS_SELECTOR, "[contenteditable='true']") if _visible(e)]
     if len(editable) == 1:
-        _human_type_text(driver, editable[0], code, clear=True)
+        fill_single(editable[0])
         return
 
     # OTP 页面上下文已经由上游确认，普通可见 text 输入框可作为最后兜底。
@@ -1208,7 +1232,7 @@ def _type_otp(driver, code: str) -> None:
         if not is_password and typ not in ("hidden", "email"):
             plain.append(e)
     if len(plain) == 1:
-        _human_type_text(driver, plain[0], code, clear=True)
+        fill_single(plain[0])
         return
     if len(plain) == len(code) and len(code) > 1:
         for e, ch in zip(plain, code):
@@ -1225,7 +1249,7 @@ def _type_otp(driver, code: str) -> None:
             non_password.append(e)
     if len(non_password) == 1:
         logger.info("%s OTP 使用唯一非密码可见输入框作为兜底", _log_prefix(driver))
-        _human_type_text(driver, non_password[0], code, clear=True)
+        fill_single(non_password[0])
         return
 
     summary = []
@@ -1320,7 +1344,7 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
             return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
             """)
             if btn:
-                text = str(btn.text or btn.get_attribute('value') or btn.get_attribute('data-dd-action-name') or '').strip()
+                text = str(getattr(btn, 'text', '') or btn.get_attribute('value') or btn.get_attribute('data-dd-action-name') or '').strip()
                 _human_click(driver, btn, label="resend_otp")
                 logger.info("%s[OTP] 已点击重新发送验证码按钮：%s", _log_prefix(driver), text or '-')
                 time.sleep(random.uniform(1.1, 2.4) if _browser_actions_enabled() else 1.5)
@@ -1340,10 +1364,29 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     """
     end = time.time() + timeout
     last = {}
+    left_verification_at: float | None = None
     while time.time() < end:
         time.sleep(0.5)
         if not _is_email_verification_page(driver):
-            return 'accepted'
+            # React briefly removes the OTP input during navigation. Do not
+            # treat that empty DOM window as success; require a stable known
+            # destination or an access token for two consecutive polls.
+            if left_verification_at is None:
+                left_verification_at = time.time()
+            current_url = str(getattr(driver, 'current_url', '') or '').lower()
+            known_next = (
+                '/about-you' in current_url
+                or '/profile' in current_url
+                or '/create-account/password' in current_url
+                or 'chatgpt.com/' in current_url and '/auth/' not in current_url
+            )
+            if _has_access_token(driver) or known_next:
+                if time.time() - left_verification_at >= 0.8:
+                    return 'accepted'
+            else:
+                left_verification_at = None
+            continue
+        left_verification_at = None
         last = _email_otp_page_state(driver)
         invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
         if invalid or (last.get('errors') or []):
@@ -2535,6 +2578,15 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             outcome = _wait_after_email_otp_submit(driver, timeout=30)
             if outcome == 'accepted':
                 break
+            if outcome == 'pending' and otp_attempt < max_otp_attempts:
+                # A slow auth callback can outlive the first wait window.
+                # Give the same submitted code another observation window
+                # before sending a new code, which avoids invalidating a code
+                # that was already accepted by the server.
+                logger.warning("%s[OTP] 未确认跳转，继续等待当前验证码回调后再决定是否重发", _log_prefix(driver))
+                outcome = _wait_after_email_otp_submit(driver, timeout=20)
+                if outcome == 'accepted':
+                    break
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             logger.warning("[Roxy注册][OTP] 验证码错误/过期，准备重新发送并重新获取验证码（%s/%s）", otp_attempt + 1, max_otp_attempts)
