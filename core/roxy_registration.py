@@ -543,6 +543,17 @@ def _click_email_entry_option(driver) -> bool:
       .filter(visible)
       .map(el => ({el, attrs: attrText(el), hasLogo: !!el.querySelector('img,svg,use')}))
       .filter(x => good.test(x.attrs) && !bad.test(x.attrs) && !x.hasLogo);
+    // The authenticated ChatGPT shell may be shown after a slow redirect.
+    // Its technical signup button is the internal registration entry even
+    // though it has no visible "email" text yet.
+    const signup = [...document.querySelectorAll('button,a,[role="button"]')]
+      .filter(visible)
+      .map(el => ({el, attrs: attrText(el)}))
+      .find(x => /(?:^|[\s_-])signup(?:-|_|\s|$)/.test(x.attrs) && !bad.test(x.attrs));
+    if (signup) {
+      signup.el.scrollIntoView({block:'center'});
+      return signup.el;
+    }
     if (candidates.length === 1) {
       candidates[0].el.scrollIntoView({block:'center'});
       return candidates[0].el;
@@ -1447,6 +1458,9 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
         final_url = str(getattr(driver, 'current_url', '') or '').lower()
     except Exception:
         final_url = ''
+    if 'email-verification' in final_url:
+        logger.warning("%s[OTP] 最终 URL 仍为验证码页，禁止按 accepted 处理：url=%s", _log_prefix(driver), final_url)
+        return 'pending'
     if _has_access_token(driver) or any(route in final_url for route in ('/about-you', '/profile', '/create-account/password')):
         return 'accepted'
     logger.warning("%s[OTP] 验证码页状态不明确，按 pending 处理：url=%s snapshot=%s", _log_prefix(driver), final_url, last)
