@@ -51,10 +51,6 @@ OTP_MAX_WAIT = 90
 # Outlook 双协议取件：抓到一封 OTP 后再多等多少秒看是否有更晚到达的邮件。
 OTP_SETTLE_SECONDS = 5
 
-# 注册失败时，自动删除 mail.apisaver.com 通用 API 邮箱池条目。
-# 仅匹配该域名，其他邮箱来源仍按原逻辑回收/停用。
-DELETE_FAILED_MAIL_APISAVER_EMAIL = True
-
 
 # ============================================================
 # Cloudflare 域名邮箱模式（转发到 QQ 邮箱，通过 IMAP 取信）
@@ -107,7 +103,6 @@ CLOUDFLARE_PATH_DOMAINS = "/api/domains"
 CLOUDFLARE_PATH_ACCOUNTS = "/api/new_address"
 CLOUDFLARE_PATH_TOKEN = "/api/token"
 CLOUDFLARE_PATH_MESSAGES = "/api/mails"
-CLOUDFLARE_PATH_DELETE = "/admin/delete_address/{email}"
 
 # 默认收信域名，多个可用换行或逗号分隔；留空则由 Worker 决定
 CLOUDFLARE_DEFAULT_DOMAINS = []
@@ -152,5 +147,13 @@ CLOUDMAIL_AUTO_ADD_USER = True
 # 随机邮箱 local-part 长度。
 CLOUDMAIL_RANDOM_LOCAL_LENGTH = 12
 
+# mail.apisaver 管理端失败邮箱清理（默认关闭，路径和鉴权按部署版本调整）。
+MAIL_ADMIN_DELETE_FAILED: bool = False
+MAIL_ADMIN_BASE: str = "https://mail.apisaver.com"
+MAIL_ADMIN_DELETE_PATH: str = "/api/admin/accounts/delete"
+MAIL_ADMIN_AUTH_KEY = env_str("MAIL_ADMIN_AUTH_KEY", "")
+MAIL_ADMIN_PASSWORD = env_str("MAIL_ADMIN_PASSWORD", "")
+MAIL_ADMIN_TIMEOUT: int = 20
+
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_PATH_DELETE': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int', 'DELETE_FAILED_MAIL_APISAVER_EMAIL': 'bool'})
+apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int', 'MAIL_ADMIN_DELETE_FAILED': 'bool', 'MAIL_ADMIN_BASE': 'str', 'MAIL_ADMIN_DELETE_PATH': 'str', 'MAIL_ADMIN_AUTH_KEY': 'str', 'MAIL_ADMIN_PASSWORD': 'str', 'MAIL_ADMIN_TIMEOUT': 'int'})

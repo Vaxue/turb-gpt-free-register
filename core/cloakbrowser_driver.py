@@ -83,6 +83,14 @@ class CloakElement:
                 self.page.keyboard.press("Control+A")
                 self.page.keyboard.press("Backspace")
 
+    def fill(self, value: str) -> None:
+        """Expose Playwright's controlled-input compatible fill for shared flows."""
+        text = str(value or "")
+        if self.locator is not None:
+            self.locator.fill(text, timeout=10000)
+        else:
+            self.handle.fill(text, timeout=10000)
+
     @property
     def tag_name(self) -> str:
         try:
@@ -391,10 +399,27 @@ class CloakSeleniumDriver:
           const fn = new Function(...args.map((_, i) => 'a' + i), payload.script);
           return fn(...args);
         }"""
-        if first_el is not None:
-            handle = first_el._eval_handle(element_wrapper, {"script": script, "args": serial_args})
-        else:
-            handle = self.page.evaluate_handle(wrapper, {"script": script, "args": serial_args})
+        # Managed Challenge/SPA 导航可能恰好发生在 evaluate_handle 创建句柄的
+        # 窗口内。重试短暂的导航竞争，避免把正常跳转报告成注册失败。
+        handle = None
+        for attempt in range(3):
+            try:
+                if first_el is not None:
+                    handle = first_el._eval_handle(element_wrapper, {"script": script, "args": serial_args})
+                else:
+                    handle = self.page.evaluate_handle(wrapper, {"script": script, "args": serial_args})
+                break
+            except Exception as exc:
+                msg = str(exc)
+                is_navigation = "Execution context was destroyed" in msg or "navigation" in msg.lower()
+                if not is_navigation or attempt >= 2:
+                    if is_navigation:
+                        logger.info("[Cloak] JS 执行期间页面导航完成，忽略脚本返回值：%s", msg[:160])
+                        return {"ok": True, "reason": "navigation_after_script"}
+                    raise
+                time.sleep(0.25 * (attempt + 1))
+        if handle is None:
+            return {"ok": True, "reason": "navigation_after_script"}
         return self._unwrap_js_result(self.page, handle)
 
 
@@ -425,21 +450,36 @@ def _proxy_is_reachable(proxy_url: str | None) -> bool:
         import requests
 
         timeout = float(getattr(_cfg, "CLOAK_PROXY_PRECHECK_TIMEOUT", 8) or 8)
-        response = requests.get(
-            "https://example.com/",
-            headers={"User-Agent": "Mozilla/5.0"},
-            proxies={"http": proxy_url, "https": proxy_url},
-            timeout=max(2.0, timeout),
-            allow_redirects=True,
+        # Probe the actual registration hosts. Some providers block
+        # example.com, which previously discarded usable nodes and forced a
+        # direct connection into Cloudflare.
+        urls = getattr(_cfg, "CLOAK_PROXY_PRECHECK_URLS", None) or (
+            "https://chatgpt.com/", "https://auth.openai.com/"
         )
-        if response.status_code >= 500:
+        last_status = None
+        last_exc = None
+        for url in urls:
+            try:
+                response = requests.get(
+                    str(url), headers={"User-Agent": "Mozilla/5.0"},
+                    proxies={"http": proxy_url, "https": proxy_url},
+                    timeout=max(2.0, timeout), allow_redirects=False,
+                )
+                last_status = int(response.status_code)
+                # 2xx/3xx/4xx prove that the CONNECT tunnel works.
+                if last_status < 500:
+                    return True
+            except Exception as exc:
+                last_exc = exc
+        if last_status is not None:
+            logger.warning("[Cloak] 代理预检返回 HTTP %s，回退直连：%s", last_status, _proxy_log_value(proxy_url))
+        elif last_exc:
             logger.warning(
-                "[Cloak] 代理预检返回 HTTP %s，回退直连：%s",
-                response.status_code,
-                _proxy_log_value(proxy_url),
+                "[Cloak] 代理预检失败，回退直连：%s (%s: %s)",
+                _proxy_log_value(proxy_url), type(last_exc).__name__,
+                str(last_exc).splitlines()[0][:240],
             )
-            return False
-        return True
+        return False
     except Exception as exc:
         logger.warning(
             "[Cloak] 代理预检失败，回退直连：%s (%s: %s)",
@@ -542,8 +582,13 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if seed:
         launch_args.append(f"--fingerprint={seed}")
 
+    # CloakBrowser 目前使用 socks5:// 参数；预检则保留调用方的 socks5h://，
+    # 让 DNS 在 Mihomo 端解析。Mihomo fake-ip/分流场景下改成 socks5://
+    # 会让 requests 在本地解析并稳定触发 SSLEOFError。
+    raw_proxy_url = str(proxy or "").strip()
     proxy_url = _normalize_proxy(proxy) if bool(getattr(_cfg, "CLOAK_USE_PROXY", True)) else None
-    if proxy_url and bool(getattr(_cfg, "CLOAK_PROXY_PRECHECK", True)) and not _proxy_is_reachable(proxy_url):
+    precheck_proxy_url = raw_proxy_url or proxy_url
+    if proxy_url and bool(getattr(_cfg, "CLOAK_PROXY_PRECHECK", True)) and not _proxy_is_reachable(precheck_proxy_url):
         proxy_url = None
     locale_opts = _build_cloak_locale_options(proxy_url)
     # geoip=True 交给 CloakBrowser 根据当前出口 IP 自动匹配 timezone/locale/WebRTC。

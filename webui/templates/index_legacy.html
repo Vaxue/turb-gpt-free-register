@@ -3041,6 +3041,9 @@ function smsConfigSectionForKey(key) {
   if (key === 'SMS_API_KEY') return ['GrizzlySMS', 'GrizzlySMS 平台 API Key 配置'];
   if (key.startsWith('H_')) return ['H 接码', 'H_API.md 本地 H 取号服务配置；项目ID/国家留空时复用通用字段'];
   if (key.startsWith('L_')) return ['L 接码', 'L_API.md 本地 L 取号服务配置'];
+  if (['DELETE_FAILED_MAIL_APISAVER_EMAIL','CLOUDFLARE_PATH_DELETE','IMAGE_API_AUTO_IMPORT','IMAGE_API_BASE','IMAGE_API_AUTH_KEY','IMAGE_API_TIMEOUT'].includes(key)) {
+    return ['邮箱同步/清理', '注册失败邮箱自动删除，以及注册成功账号同步到 image.apisaver 生图账号池'];
+  }
   return ['其他接码配置', ''];
 }
 
@@ -3108,7 +3111,7 @@ function renderConfigFields(fields) {
       CONFIG_SMS_ACTIVE_SECTION,
       v => { CONFIG_SMS_ACTIVE_SECTION = v; },
       smsConfigSectionForKey,
-      ['通用接码', 'GrizzlySMS', 'H 接码', 'L 接码', '其他接码配置'],
+      ['通用接码', 'GrizzlySMS', 'H 接码', 'L 接码', '邮箱同步/清理', '其他接码配置'],
       'sms-config-section'
     );
   }

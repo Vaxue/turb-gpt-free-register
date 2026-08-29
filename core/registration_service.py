@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from core import codex_retry_service, db
 
@@ -185,46 +184,18 @@ def _disable_job_email(email: str | None, reason: str) -> bool:
         return False
 
 
-def _delete_failed_mail_apisaver_email(email: str | None, reason: str) -> bool:
-    """注册失败时删除 mail.apisaver.com 通用邮箱，避免失败邮箱再次入池。"""
-    email = str(email or "").strip()
+def _delete_failed_job_email(email: str | None, reason: str) -> bool:
+    """按 WebUI 配置调用 mail.apisaver 管理接口删除失败临时邮箱。"""
     if not email:
         return False
+    # 管理接口只用于 mail.apisaver 临时邮箱，避免误删外购/自有域名邮箱。
+    if not str(email).strip().lower().endswith("@mail.apisaver.com"):
+        return False
     try:
-        from config import email as email_cfg
-        if not bool(getattr(email_cfg, "DELETE_FAILED_MAIL_APISAVER_EMAIL", True)):
-            return False
-
-        # 已经成功落库的账号可能只是后续 Codex/套餐步骤失败，保留其邮箱。
-        if db.get_account_by_email(email) is not None:
-            return False
-
-        from core.email_provider import resolve_email_source
-        source = resolve_email_source(email)
-
-        # 当前 mail.apisaver 使用 Cloudflare 临时邮箱模式，直接调用其管理员删除接口。
-        if source == "cloudflare" and email.lower().endswith("@mail.apisaver.com"):
-            from core.cf_temp_mail_client import delete_account
-            deleted = bool(delete_account(email))
-            if deleted:
-                logger.warning("[Service] 注册失败已从 mail.apisaver 删除临时邮箱: email=%s reason=%s", email, str(reason)[:220])
-            return deleted
-
-        if source != "generic_api":
-            return False
-
-        from core.generic_api_mail_client import get_account_context
-        context = get_account_context(email)
-        host = str(urlparse(str(getattr(context, "code_url", "") or "")).hostname or "").lower().rstrip(".")
-        if host != "mail.apisaver.com" and not host.endswith(".mail.apisaver.com"):
-            return False
-
-        deleted = bool(db.delete_generic_api_email(email))
-        if deleted:
-            logger.warning("[Service] 注册失败已删除 mail.apisaver 邮箱: email=%s reason=%s", email, str(reason)[:220])
-        return deleted
+        from core.mail_admin import delete_email
+        return bool(delete_email(email, reason=reason).get("ok"))
     except Exception:
-        logger.exception("[Service] 删除失败 mail.apisaver 邮箱异常: %s", email)
+        logger.exception("[Service] mail 管理端删除失败邮箱异常: %s", email)
         return False
 
 
@@ -378,9 +349,8 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
                 email_to_handle = str(result_email or email or "").strip()
-                if _delete_failed_mail_apisaver_email(email_to_handle, str(err)):
-                    pass
-                elif _should_disable_failed_registration_email(err):
+                _delete_failed_job_email(email_to_handle, str(err))
+                if _should_disable_failed_registration_email(err):
                     _disable_job_email(email_to_handle, str(err))
                 else:
                     _release_unconsumed_job_email(email_to_handle, str(err))
@@ -396,9 +366,8 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         )
     except Exception as exc:
         err_text = f"{type(exc).__name__}: {exc}"
-        if _delete_failed_mail_apisaver_email(email, err_text):
-            pass
-        elif _should_disable_failed_registration_email(err_text):
+        _delete_failed_job_email(email, err_text)
+        if _should_disable_failed_registration_email(err_text):
             _disable_job_email(email, err_text)
         else:
             _release_unconsumed_job_email(email, err_text)

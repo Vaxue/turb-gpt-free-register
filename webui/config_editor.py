@@ -239,6 +239,10 @@ EDITABLE_FIELDS = [
         "label": "关闭接口路径", "help": "默认 /browser/close",
     },
     {
+        "key": "ROXY_CHALLENGE_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
+        "label": "Cloudflare挑战等待", "help": "Roxy 遇到 Cloudflare 挑战时单独等待时长，秒",
+    },
+    {
         "key": "ROXY_KEEP_BROWSER_OPEN", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "保留浏览器", "help": "调试时可开启，任务结束后不自动关闭 Roxy 环境",
     },

@@ -54,7 +54,14 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
             f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
         )
-        result = check_account_liveness(email, proxy=selected_proxy, clear_log=False)
+        account = db.get_account(account_id) or {}
+        saved_token = str(account.get("access_token") or "").strip()
+        result = check_account_liveness(
+            email,
+            proxy=selected_proxy,
+            clear_log=False,
+            existing_access_token=saved_token,
+        )
         # 早期 providers/csrf 403 通常是该出口被 CF 拦截，不代表账号死亡。
         # auto/proxy 模式下如果用了代理，额外直连兜底一次，便于和套餐查询的 auto 语义保持接近。
         err_text = str(result.get("error") or "")
@@ -66,7 +73,12 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             and str(route.get("network_route") or "") == "proxy"
         ):
             _append_log(email, "[查活] 代理出口收到 403，尝试直连兜底一次")
-            result = check_account_liveness(email, proxy="", clear_log=False)
+            result = check_account_liveness(
+                email,
+                proxy="",
+                clear_log=False,
+                existing_access_token=saved_token,
+            )
         # 查活成功后把新 AT 同步回 image.apisaver，避免图片账号池继续使用旧 token。
         if result.get("ok") and result.get("access_token"):
             try:
@@ -77,7 +89,12 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                         result.get("access_token"), email=email, force=True,
                     )
                     result["image_sync"] = sync
-                    _append_log(email, f"[查活] image 账号 AT 同步完成：{sync.get('status_code', '-')}" if sync.get("ok") else f"[查活] image AT 同步跳过：{sync.get('reason', '-')}")
+                    _append_log(
+                        email,
+                        f"[查活] image 账号 AT 同步完成：{sync.get('status_code', '-')}"
+                        if sync.get("ok") else
+                        f"[查活] image AT 同步跳过：{sync.get('reason', '-')}"
+                    )
             except Exception as exc:
                 # image 同步失败不应把已经成功的查活标成失败；保留错误供日志排查。
                 result["image_sync"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
