@@ -22,6 +22,23 @@ _RUNNING: set[int] = set()
 _LOCK = threading.Lock()
 
 
+def _delete_failed_account_and_mail(account_id: int, email: str, *, reason: str) -> dict:
+    """删除确认失效的本地账号，并尽力删除 mail.apisaver 临时邮箱。"""
+    out = {"account_id": int(account_id), "email": email, "deleted": False, "mail_deleted": False}
+    try:
+        from core.mail_admin import delete_email
+        mail_result = delete_email(email, reason=reason)
+        out["mail_deleted"] = bool(mail_result.get("ok"))
+        out["mail"] = mail_result
+    except Exception as exc:
+        out["mail_error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
+    try:
+        out["deleted"] = bool(db.delete_account(acc_id=int(account_id)))
+    except Exception as exc:
+        out["delete_error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
+    return out
+
+
 def is_checking(email: str) -> bool:
     acc = db.get_account_by_email(email)
     if not acc:
@@ -100,6 +117,21 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 result["image_sync"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
                 _append_log(email, f"[查活] image AT 同步失败：{result['image_sync']['error']}")
         db.update_account_liveness(account_id, result)
+        try:
+            from config import image_api as image_cfg
+            if not result.get("ok") and bool(getattr(image_cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILED", False)):
+                row = db.get_account(account_id) or {}
+                failures = int(row.get("live_check_failed_count") or 0)
+                threshold = max(1, int(getattr(image_cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILURE_THRESHOLD", 2) or 2))
+                if result.get("status") == "deactivated" or failures >= threshold:
+                    cleanup = _delete_failed_account_and_mail(
+                        account_id, email,
+                        reason=f"查活失败 {failures} 次: {result.get('error') or result.get('status')}",
+                    )
+                    result["cleanup"] = cleanup
+                    _append_log(email, f"[查活] 失败账号清理：本地删除={cleanup.get('deleted')} 邮箱删除={cleanup.get('mail_deleted')}")
+        except Exception as exc:
+            _append_log(email, f"[查活] 失败账号清理异常：{type(exc).__name__}: {str(exc)[:240]}")
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")
         elif result.get("status") == "deactivated":
@@ -118,6 +150,16 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             db.update_account_liveness(account_id, result)
         except Exception:
             logger.exception("[查活] 写入异常状态失败: account_id=%s", account_id)
+        try:
+            from config import image_api as image_cfg
+            if bool(getattr(image_cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILED", False)):
+                row = db.get_account(account_id) or {}
+                failures = int(row.get("live_check_failed_count") or 0)
+                threshold = max(1, int(getattr(image_cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILURE_THRESHOLD", 2) or 2))
+                if failures >= threshold:
+                    _delete_failed_account_and_mail(account_id, email, reason=f"查活异常 {failures} 次: {result['error']}")
+        except Exception:
+            logger.exception("[查活] 异常账号清理失败: account_id=%s", account_id)
         logger.exception("[查活] 后台异常: %s", email)
         try:
             _append_log(email, f"[查活] 后台异常：{result['error']}")
