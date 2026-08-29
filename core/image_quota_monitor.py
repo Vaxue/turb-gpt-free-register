@@ -18,6 +18,7 @@ _state: dict[str, Any] = {
     "workers": None, "last_check_at": None, "last_trigger_at": None,
     "last_error": "", "last_trigger": None, "last_live_check_at": None,
     "last_live_check": None, "live_cursor": 0,
+    "last_midnight_cleanup_at": None, "last_midnight_cleanup": None,
 }
 
 
@@ -218,6 +219,41 @@ def schedule_live_checks() -> dict[str, Any]:
     return result
 
 
+def cleanup_failed_accounts(*, force: bool = False) -> dict[str, Any]:
+    """清理达到失败阈值或已废的本地账号，并删除对应临时邮箱。"""
+    cfg = _cfg()
+    if not force and not bool(getattr(cfg, "IMAGE_API_MIDNIGHT_CLEANUP_ENABLED", False)):
+        return {"ok": True, "skipped": True, "deleted": 0, "mail_deleted": 0}
+    try:
+        from core import db
+        from core.live_check_service import _delete_failed_account_and_mail
+        rows = list(db.list_accounts(limit=5000, archived=False) or [])
+    except Exception as exc:
+        return {"ok": False, "deleted": 0, "mail_deleted": 0, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+    threshold = max(1, int(getattr(cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILURE_THRESHOLD", 2) or 2))
+    deleted, mail_deleted, skipped = [], 0, []
+    for row in rows:
+        status = str(row.get("live_check_status") or "")
+        failures = int(row.get("live_check_failed_count") or 0)
+        if status != "deactivated" and not (status == "failed" and failures >= threshold):
+            continue
+        acc_id = int(row.get("id") or 0)
+        email = str(row.get("email") or "").strip()
+        if not acc_id or not email:
+            continue
+        item = _delete_failed_account_and_mail(acc_id, email, reason=f"定时清理: status={status} failures={failures}")
+        if item.get("deleted"):
+            deleted.append(item)
+            mail_deleted += int(bool(item.get("mail_deleted")))
+        else:
+            skipped.append(item)
+    result = {"ok": True, "deleted": len(deleted), "mail_deleted": mail_deleted, "items": deleted, "skipped": skipped}
+    with _lock:
+        _state.update({"last_midnight_cleanup_at": time.time(), "last_midnight_cleanup": result})
+    logger.info("[ImageQuota] 失败账号定时清理：deleted=%s mail_deleted=%s", len(deleted), mail_deleted)
+    return result
+
+
 def status() -> dict[str, Any]:
     cfg = _cfg()
     with _lock:
@@ -231,6 +267,10 @@ def status() -> dict[str, Any]:
         "live_check_interval_seconds": max(30, int(getattr(cfg, "IMAGE_API_LIVE_CHECK_INTERVAL_SECONDS", 3600) or 3600)),
         "live_check_batch_size": max(1, int(getattr(cfg, "IMAGE_API_LIVE_CHECK_BATCH_SIZE", 20) or 20)),
         "live_check_sync_image": bool(getattr(cfg, "IMAGE_API_LIVE_CHECK_SYNC_IMAGE", True)),
+        "live_check_delete_failed": bool(getattr(cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILED", False)),
+        "live_check_delete_failure_threshold": max(1, int(getattr(cfg, "IMAGE_API_LIVE_CHECK_DELETE_FAILURE_THRESHOLD", 2) or 2)),
+        "midnight_cleanup_enabled": bool(getattr(cfg, "IMAGE_API_MIDNIGHT_CLEANUP_ENABLED", False)),
+        "midnight_cleanup_hour": max(0, min(23, int(getattr(cfg, "IMAGE_API_MIDNIGHT_CLEANUP_HOUR", 0) or 0))),
     })
     return result
 
@@ -252,6 +292,18 @@ def _loop() -> None:
                     schedule_live_checks()
                 except Exception:
                     logger.exception("[ImageQuota] 定时查活调度异常")
+        if bool(getattr(cfg, "IMAGE_API_MIDNIGHT_CLEANUP_ENABLED", False)):
+            now_local = time.localtime()
+            cleanup_hour = max(0, min(23, int(getattr(cfg, "IMAGE_API_MIDNIGHT_CLEANUP_HOUR", 0) or 0)))
+            with _lock:
+                last_cleanup = float(_state.get("last_midnight_cleanup_at") or 0)
+            last_local = time.localtime(last_cleanup) if last_cleanup else None
+            same_day = bool(last_local and last_local.tm_yday == now_local.tm_yday and last_local.tm_year == now_local.tm_year)
+            if now_local.tm_hour == cleanup_hour and not same_day:
+                try:
+                    cleanup_failed_accounts()
+                except Exception:
+                    logger.exception("[ImageQuota] 定时失败账号清理异常")
         quota_wait = max(10, int(getattr(cfg, "IMAGE_API_QUOTA_POLL_SECONDS", 60) or 60))
         wait_seconds = min(quota_wait, live_interval) if live_enabled else quota_wait
         _stop.wait(wait_seconds)
