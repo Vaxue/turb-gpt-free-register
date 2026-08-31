@@ -1243,14 +1243,17 @@ def _type_otp(driver, code: str) -> None:
             length = int(driver.execute_script("return String(arguments[0].value || '').length", element) or 0)
         except Exception:
             length = 0
-        if length != 6:
-            driver.execute_script(r"""
-            const el = arguments[0], value = String(arguments[1]);
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-            if (setter) setter.call(el, value); else el.value = value;
-            el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
-            el.dispatchEvent(new Event('change', {bubbles:true}));
-            """, element, code)
+        # Always synchronize React's controlled value after the adapter fill.
+        # Playwright can update the DOM value while a re-rendered auth input
+        # misses the input/change event, leaving Continue disabled or ignored.
+        driver.execute_script(r"""
+        const el = arguments[0], value = String(arguments[1]);
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(el, value); else el.value = value;
+        try { el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value})); }
+        catch (_) { el.dispatchEvent(new Event('input', {bubbles:true})); }
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        """, element, code)
 
     # 邮箱验证码页由 React 异步渲染；高并发时 DOM 可能短暂没有任何 input。
     # 先等待控件出现，再进入特征匹配，避免 candidates=[] 的瞬时失败。
@@ -1456,6 +1459,17 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     left_verification_at: float | None = None
     while time.time() < end:
         time.sleep(0.5)
+        # Auth callback failures can briefly render an error route without
+        # adding a field-level error to the OTP form. Treat those as a
+        # retryable submission so the caller can obtain a fresh code instead
+        # of advancing to the profile step with an unauthenticated session.
+        try:
+            callback_url = str(getattr(driver, 'current_url', '') or '').lower()
+        except Exception:
+            callback_url = ''
+        if '/auth/error' in callback_url or 'error=undefined' in callback_url:
+            logger.warning("%s[OTP] 认证回调进入错误路由，按 pending 重试：url=%s", _log_prefix(driver), callback_url)
+            return 'pending'
         if not _is_email_verification_page(driver):
             # React briefly removes the OTP input during navigation. Do not
             # treat that empty DOM window as success; require a stable known
@@ -1527,6 +1541,45 @@ def _otp_acceptance_is_stable(driver, settle: float = 1.4) -> bool:
 
 
 def _click_continue(driver) -> None:
+    # The OTP screen has two submit buttons (Continue and resend). Selecting
+    # the first generic submit is race-prone because React can reorder them.
+    # Resolve the button from the active OTP input's form and score Continue-
+    # like controls while explicitly excluding resend actions.
+    try:
+        target = driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const enabled = el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+        const otp = [...document.querySelectorAll(
+          'input[autocomplete="one-time-code"],input[name="code"],input[inputmode="numeric"],input[type="tel"]'
+        )].find(visible) || [...document.querySelectorAll('input:not([type="hidden"])')].find(visible);
+        const form = otp?.closest('form');
+        const scope = form || document;
+        const candidates = [...scope.querySelectorAll('button,input[type="submit"],[role="button"]')]
+          .filter(enabled)
+          .map((el, index) => {
+            const attrs = [el.type, el.name, el.value, el.id, el.getAttribute('data-dd-action-name'),
+              el.getAttribute('aria-label'), el.textContent].filter(Boolean).join(' ').toLowerCase();
+            const resend = /resend|send.*new|new.*code|send.*again|重新发送|重发|再送信/.test(attrs);
+            const submit = String(el.getAttribute('type') || '').toLowerCase() === 'submit';
+            let score = submit ? 100 : 0;
+            if (/continue|verify|submit|next|proceed|続行|确认|确定/.test(attrs)) score += 80;
+            if (resend) score -= 500;
+            return {el, index, score, attrs, resend};
+          })
+          .filter(x => !x.resend)
+          .sort((a, b) => b.score - a.score || a.index - b.index);
+        const chosen = candidates[0]?.el;
+        if (!chosen) return null;
+        chosen.scrollIntoView({block: 'center', inline: 'center'});
+        return chosen;
+        """)
+        if target:
+            _human_click(driver, target, label="otp_continue")
+            logger.info("%s[OTP] 已提交当前验证码表单 Continue", _log_prefix(driver))
+            return
+    except Exception as exc:
+        logger.debug("%s[OTP] 精确提交按钮选择失败，回退通用选择器：%s", _log_prefix(driver), exc)
     _click_any(driver, [
         "button[type='submit']",
         "//button[@data-dd-action-name='Continue']",

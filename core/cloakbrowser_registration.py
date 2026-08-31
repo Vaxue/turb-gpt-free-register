@@ -18,6 +18,7 @@ from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _otp_acceptance_is_stable, _is_email_verification_page, _email_otp_page_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
 
         current_otp = otp_code
         max_otp_attempts = 3
+        otp_accepted = False
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
@@ -79,15 +81,54 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             except Exception as exc:
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=10)
+            # The auth callback is often slower than the form response. Keep
+            # observing the same code before requesting another one; an early
+            # resend invalidates a code that the server is still processing.
+            outcome = _wait_after_email_otp_submit(driver, timeout=30)
+            logger.warning(
+                "[Cloak注册][OTP] 提交观察结果：outcome=%s url=%s otp_page=%s",
+                outcome, getattr(driver, "current_url", ""), _is_email_verification_page(driver),
+            )
             if outcome == "accepted":
-                break
+                # A callback can briefly leave the OTP route and then restore
+                # it when the code was rejected or the session cookie was not
+                # committed yet. Require a short stable observation before
+                # advancing to profile/session handling.
+                if _otp_acceptance_is_stable(driver, settle=24.0):
+                    otp_accepted = True
+                    logger.info("[Cloak注册][OTP] 认证回调稳定通过：url=%s", getattr(driver, "current_url", ""))
+                    break
+                logger.warning("[Cloak注册][OTP] 回调短暂离开验证码页后又返回，继续重试当前流程")
+                outcome = "pending"
+            if outcome == "pending" and otp_attempt < max_otp_attempts:
+                outcome = _wait_after_email_otp_submit(driver, timeout=20)
+                logger.warning(
+                    "[Cloak注册][OTP] 延迟观察结果：outcome=%s url=%s otp_page=%s",
+                    outcome, getattr(driver, "current_url", ""), _is_email_verification_page(driver),
+                )
+                if outcome == "accepted" and _otp_acceptance_is_stable(driver, settle=24.0):
+                    otp_accepted = True
+                    logger.info("[Cloak注册][OTP] 延迟回调稳定通过：url=%s", getattr(driver, "current_url", ""))
+                    break
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             otp_after_ts = time.time()
             _click_resend_email_otp(driver, timeout=25)
             human_delay("api")
             current_otp = None
+
+        # Never let a transient accepted result flow into the profile stage
+        # while the browser is still asking for the code.
+        if not otp_accepted or _is_email_verification_page(driver):
+            raise RuntimeError(
+                f"邮箱验证码认证回调未完成：url={getattr(driver, 'current_url', '')}; "
+                f"state={_email_otp_page_state(driver)}"
+            )
+
+        logger.warning(
+            "[Cloak注册][OTP] 进入资料页前状态确认：url=%s otp_page=%s",
+            getattr(driver, "current_url", ""), _is_email_verification_page(driver),
+        )
 
         profile_submitted = _complete_profile_page(driver, name, birthday, timeout=60)
         if profile_submitted:
