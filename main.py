@@ -601,16 +601,21 @@ def run_registration(
     result = None
     selected_proxy = proxy
     for attempt in range(1, max_attempts + 1):
+        driver_mode = str(getattr(_roxy_cfg, 'REGISTRATION_DRIVER', 'protocol') or 'protocol').strip().lower()
         if attempt > 1:
             try:
                 selected_proxy = None
                 from config import proxy as proxy_cfg
-                proxy_cfg.refresh_proxy_subscription(force=True)
-                selected_proxy = proxy_cfg.pick_proxy()
+                if driver_mode in ('protocol', 'api', 'http'):
+                    proxy_cfg.refresh_proxy_subscription(force=True)
+                    selected_proxy = proxy_cfg.pick_registration_proxy(f"{email}#retry-{attempt}")
             except Exception as exc:
                 logger.warning('[注册] 刷新代理订阅失败，继续使用代理池随机节点：%s', str(exc)[:180])
                 selected_proxy = None
-            logger.warning('[注册] 网络型失败后切换出口重试：attempt=%s/%s proxy=%s', attempt, max_attempts, selected_proxy or 'direct')
+            if driver_mode in ('protocol', 'api', 'http'):
+                logger.warning('[注册] 网络型失败后切换出口重试：attempt=%s/%s proxy=%s', attempt, max_attempts, selected_proxy or 'direct')
+            else:
+                logger.warning('[注册] Cloak 网络型失败后按当前浏览器配置重试：attempt=%s/%s', attempt, max_attempts)
         result = _run_registration_once(
             email=email, name=name, birthday=birthday, proxy=selected_proxy,
             otp_code=(otp_code if attempt == 1 else None), batch_dir=batch_dir,
